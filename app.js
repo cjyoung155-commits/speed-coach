@@ -10,7 +10,7 @@
     get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private mode */ } }
   };
-  const DEFAULTS = { eco: 0, band: 5, fallback: 45, voice: true, simX: 4 };
+  const DEFAULTS = { eco: 0, band: 5, fallback: 45, voice: true, simX: 4, accelWarn: 3 };
   const settings = Object.assign({}, DEFAULTS, store.get('sc.settings', {}));
   const saveSettings = () => store.set('sc.settings', settings);
 
@@ -253,6 +253,17 @@
     }
     const minRange = opts.minRange || 15;
     if (hi - lo < minRange) { const mid = (hi + lo) / 2; lo = mid - minRange / 2; hi = mid + minRange / 2; }
+    if (opts.scale) {
+      // Ease the vertical scale so the graph glides instead of re-zooming every update:
+      // widen quickly when terrain needs it, tighten slowly.
+      const sc = opts.scale, pad = (hi - lo) * 0.08, tlo = lo - pad, thi = hi + pad;
+      if (sc.lo == null || tlo < sc.lo - 40 || thi > sc.hi + 40) { sc.lo = tlo; sc.hi = thi; }
+      else {
+        sc.lo += (tlo - sc.lo) * (tlo < sc.lo ? 0.35 : 0.06);
+        sc.hi += (thi - sc.hi) * (thi > sc.hi ? 0.35 : 0.06);
+      }
+      lo = sc.lo; hi = sc.hi;
+    }
     const X = i => (i / N) * w, Y = e => padT + ph - (e - lo) / (hi - lo) * ph;
     // fill
     const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
@@ -295,10 +306,11 @@
   const AHEAD_M = 2000;
   function drawAhead() {
     if (!route || $('drive').hidden) return;
-    const d0 = Math.max(0, drive.d - 120);
+    const dNow = drive.dispD != null ? drive.dispD : drive.d;
+    const d0 = Math.max(0, dNow - 120);
     drawProfile($('aheadProfile'), d0, d0 + AHEAD_M, {
-      minRange: 15, marker: drive.d,
-      labels: [{ d: drive.d, text: 'You' }, { d: drive.d + 804.7, text: '½ mi' }, { d: drive.d + 1609.3, text: '1 mi' }]
+      minRange: 15, marker: dNow, scale: drive.scale,
+      labels: [{ d: dNow, text: 'You' }, { d: dNow + 804.7, text: '½ mi' }, { d: dNow + 1609.3, text: '1 mi' }]
     });
   }
 
@@ -307,7 +319,11 @@
     active: false, sim: null, watchId: null, idx: null, d: 0, speed: 0, lastFix: null, hasFix: false,
     prevMode: null, last: null, override: null, overrideKey: null,
     offCount: 0, rerouting: false, lastReroute: 0,
-    spokenAt: {}, lastSpeak: 0, wakeLock: null
+    spokenAt: {}, lastSpeak: 0, wakeLock: null,
+    // smooth motion between GPS fixes
+    fixAt: 0, timeScale: 1, dispD: null, lastDraw: 0, scale: {}, ticker: null,
+    // acceleration warning and the 4-second step speed
+    samples: [], accel: null, hard: false, hardCount: 0, step: null
   };
 
   async function keepAwake() {
@@ -331,7 +347,9 @@
     if (!route) return;
     Object.assign(drive, {
       active: true, idx: null, d: 0, speed: 0, lastFix: null, hasFix: false, prevMode: null, last: null,
-      override: null, overrideKey: null, offCount: 0, rerouting: false, spokenAt: {}, lastSpeak: 0
+      override: null, overrideKey: null, offCount: 0, rerouting: false, spokenAt: {}, lastSpeak: 0,
+      fixAt: 0, timeScale: sim ? (settings.simX || 1) : 1, dispD: null, lastDraw: 0, scale: {},
+      samples: [], accel: null, hard: false, hardCount: 0, step: null
     });
     $('plan').hidden = true; $('drive').hidden = false;
     $('simTag').hidden = !sim;
@@ -347,11 +365,34 @@
         acc: p.coords.accuracy, ts: p.timestamp || Date.now()
       }), e => showBanner(geoErrorText(e)), { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
     }
-    requestAnimationFrame(drawAhead);
+    drive.ticker = setInterval(update, 500);
+    requestAnimationFrame(frame);
+  }
+
+  /** Where you probably are right now: last fix plus distance driven since. */
+  function predictedD() {
+    if (!drive.hasFix || drive.offCount) return drive.d;
+    const el = Math.min(2.5, (performance.now() - drive.fixAt) / 1000 * drive.timeScale);
+    return Math.min(route.total, drive.d + drive.speed / MPH * el);
+  }
+
+  /** Graph animation, ~25 frames a second. */
+  function frame(ts) {
+    if (!drive.active) return;
+    requestAnimationFrame(frame);
+    if (ts - drive.lastDraw < 40) return;
+    const dt = drive.lastDraw ? Math.min(0.2, (ts - drive.lastDraw) / 1000) : 0;
+    drive.lastDraw = ts;
+    if (!drive.hasFix) return;
+    const pred = predictedD();
+    if (drive.dispD == null || Math.abs(pred - drive.dispD) > 250) drive.dispD = pred;
+    else drive.dispD += (pred - drive.dispD) * Math.min(1, dt * 6);
+    drawAhead();
   }
 
   function endDrive() {
     drive.active = false;
+    if (drive.ticker) { clearInterval(drive.ticker); drive.ticker = null; }
     if (drive.watchId != null) { navigator.geolocation.clearWatch(drive.watchId); drive.watchId = null; }
     if (drive.sim) { clearInterval(drive.sim.timer); drive.sim = null; }
     if (drive.wakeLock) { drive.wakeLock.release().catch(() => {}); drive.wakeLock = null; }
@@ -378,6 +419,20 @@
     if (mph != null) drive.speed = drive.hasFix ? drive.speed * 0.35 + mph * 0.65 : mph;
     drive.lastFix = { lat: f.lat, lon: f.lon, ts: f.ts };
     drive.hasFix = true;
+    drive.fixAt = performance.now();
+
+    // Acceleration over the last ~4 seconds; the corner speed turns red when it's too hard.
+    if (mph != null) {
+      const t = f.ts / 1000;
+      drive.samples.push({ t, v: mph });
+      while (drive.samples.length && t - drive.samples[0].t > 4) drive.samples.shift();
+    }
+    const thr = settings.accelWarn || 3;
+    drive.accel = C.accelFrom(drive.samples);
+    if (drive.accel != null && drive.speed > 4 && drive.accel > thr) drive.hardCount++;
+    else drive.hardCount = 0;
+    if (drive.hardCount >= 2) drive.hard = true;
+    else if (drive.accel == null || drive.accel < thr - 0.7 || drive.speed <= 4) drive.hard = false;
 
     const accurate = !(f.acc > 60);
     if (sn.dist > 70 && accurate) drive.offCount++;
@@ -389,18 +444,26 @@
     } else if (f.acc > 60) showBanner('Weak GPS signal');
     else if (!drive.rerouting) showBanner('');
 
+    update();
+  }
+
+  /** Recompute the suggestion. Runs on every GPS fix and twice a second between fixes. */
+  function update() {
+    if (!drive.active || !route || !drive.hasFix) return;
+    const d = predictedD();
     // A manual limit sticks until the mapped limit changes.
-    const under = C.limitAt(route, limits, drive.d);
+    const under = C.limitAt(route, limits, d);
     const key = under ? under.mph + under.src : 'none';
     if (drive.override != null && key !== drive.overrideKey) drive.override = null;
 
     const s = C.suggest({
-      route, profile, limits, d: drive.d, speed: drive.speed, prevMode: drive.prevMode,
+      route, profile, limits, d, speed: drive.speed, prevMode: drive.prevMode,
       settings: { band: settings.band, eco: settings.eco, fallback: settings.fallback },
       override: drive.override
     });
     drive.last = s;
-    render(s);
+    drive.step = C.stepSpeed(s, drive.speed, settings.accelWarn);
+    render(s, d);
     if (s.cue && s.mode !== drive.prevMode) {
       const now = Date.now();
       if (now - drive.lastSpeak > 6000 && now - (drive.spokenAt[s.mode] || 0) > 25000) {
@@ -418,7 +481,7 @@
     try {
       const res = await loadAll({ lat: p[0], lon: p[1] }, dest);
       route = res.r; profile = res.prof; limits = res.lim;
-      Object.assign(drive, { idx: null, d: 0, offCount: 0, override: null });
+      Object.assign(drive, { idx: null, d: 0, offCount: 0, override: null, dispD: null, scale: {} });
       showBanner('');
     } catch (e) { showBanner('Off route — couldn’t get a new route yet'); }
     drive.rerouting = false;
@@ -427,16 +490,18 @@
   function renderWaiting() {
     $('targetBox').className = 'target state-wait';
     $('targetVal').textContent = '--'; $('speedVal').textContent = '--'; $('limitVal').textContent = '--';
-    $('hint').textContent = 'Waiting for GPS…'; $('msg').textContent = ' '; $('ahead').textContent = ' ';
-    $('limitSrc').textContent = ' '; $('sign').className = 'sign';
+    $('hint').textContent = 'Waiting for GPS…'; $('msg').textContent = '\u00a0'; $('ahead').textContent = '\u00a0';
+    $('limitSrc').textContent = '\u00a0'; $('sign').className = 'sign';
     $('remain').textContent = fmtMi(route.total) + ' to go';
+    $('stepBox').classList.add('off');
+    $('nowBox').classList.remove('hard'); $('nowLabel').textContent = 'mph now';
   }
 
   const HINTS = {
     on: 'On target', over: 'Ease off', under: 'Speed up gently', hold: 'Steady throttle — don’t chase it'
   };
 
-  function render(s) {
+  function render(s, d) {
     const speed = drive.speed;
     const state = C.speedState(speed, s);
     $('targetBox').className = 'target state-' + state;
@@ -450,10 +515,17 @@
     const srcText = { posted: 'posted', est: 'est. from road type', default: 'unknown · your setting', manual: 'set by you' }[s.src] || '';
     $('limitSrc').textContent = srcText;
     $('sign').className = 'sign' + (s.src === 'est' ? ' est' : s.src === 'default' ? ' unknown' : s.src === 'manual' ? ' manual' : '');
-    $('msg').textContent = s.msg || ' ';
-    $('ahead').textContent = s.ahead || ' ';
-    $('remain').textContent = fmtMi(Math.max(0, route.total - drive.d)) + ' to go';
-    drawAhead();
+    $('msg').textContent = s.msg || '\u00a0';
+    $('ahead').textContent = s.ahead || '\u00a0';
+    $('remain').textContent = fmtMi(Math.max(0, route.total - d)) + ' to go';
+    const st = drive.step, sb = $('stepBox');
+    if (st) {
+      sb.classList.remove('off');
+      $('stepVal').textContent = String(st.mph);
+      $('stepArrow').textContent = st.dir === 'up' ? '↑' : '↓';
+    } else sb.classList.add('off');
+    $('nowBox').classList.toggle('hard', drive.hard);
+    $('nowLabel').textContent = drive.hard ? 'easy on the gas' : 'mph now';
   }
 
   function adjustLimit(delta) {
@@ -462,24 +534,26 @@
     drive.overrideKey = under ? under.mph + under.src : 'none';
     const cur = drive.override != null ? drive.override : drive.last.base;
     drive.override = Math.max(5, Math.min(85, Math.round((cur + delta) / 5) * 5));
-    if (drive.lastFix) onFix({ lat: drive.lastFix.lat, lon: drive.lastFix.lon, speed: drive.speed / MPH, acc: 5, ts: Date.now() });
+    update();
   }
 
   // ------------------------------------------------------------ test-drive simulator
   function startSim() {
-    const sim = { d: 0, v: 0 };
+    const sim = { d: 0, v: 0, t: Date.now() };
     drive.sim = sim;
     const tick = () => {
       const s = drive.last;
-      const target = s ? (s.mode === 'arrived' ? 0 : s.target) : 20;
+      const step = s ? C.stepSpeed(s, sim.v, settings.accelWarn) : null;
+      const aim = s ? (s.mode === 'arrived' ? 0 : step ? step.mph : s.target) : 20;
       const g = C.gradeAvg(profile, sim.d - 30, sim.d + 30);
-      // A driver who follows the suggestion, a little late and imperfectly; hills tug on the truck.
-      let a = (target - sim.v) * 0.18;
-      a = Math.max(-4, Math.min(2.2, a)) + (Math.random() - 0.5) * 0.9 - g * 0.12;
+      // A driver who follows the 4-second number, imperfectly; hills tug on the truck.
+      let a = (aim - sim.v) / 4;
+      a = Math.max(-4, Math.min(2.6, a)) + (Math.random() - 0.5) * 0.9 - g * 0.12;
       sim.v = Math.max(0, sim.v + a);
       sim.d = Math.min(route.total, sim.d + sim.v / MPH);
+      sim.t += 1000;                                   // one simulated second per tick
       const p = C.pointAt(route, sim.d);
-      onFix({ lat: p[0], lon: p[1], speed: sim.v / MPH, acc: 5, ts: Date.now() });
+      onFix({ lat: p[0], lon: p[1], speed: sim.v / MPH, acc: 5, ts: sim.t });
     };
     sim.timer = setInterval(tick, 1000 / (settings.simX || 1));
     tick();
@@ -490,9 +564,10 @@
     document.querySelectorAll('.settings .row[data-key]').forEach(row => {
       const key = row.dataset.key, min = +row.dataset.min, max = +row.dataset.max, step = +row.dataset.step;
       const out = row.querySelector('output');
-      const show = () => { out.textContent = String(settings[key]); };
+      const dec = +(row.dataset.dec || 0);
+      const show = () => { out.textContent = Number(settings[key]).toFixed(dec); };
       row.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-        settings[key] = Math.max(min, Math.min(max, settings[key] + step * +b.dataset.d));
+        settings[key] = Math.round(Math.max(min, Math.min(max, settings[key] + step * +b.dataset.d)) * 10) / 10;
         saveSettings(); show();
       }));
       show();
@@ -531,7 +606,7 @@
     new ResizeObserver(drawRouteProfile).observe($('routeProfile'));
     new ResizeObserver(drawAhead).observe($('aheadProfile'));
   }
-  window.addEventListener('orientationchange', () => setTimeout(() => { drawAhead(); drawRouteProfile(); }, 300));
+  window.addEventListener('orientationchange', () => setTimeout(() => { drive.scale = {}; drawAhead(); drawRouteProfile(); }, 300));
 
   const standalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
   const iOS = /iPhone|iPad|iPod/.test(navigator.userAgent);

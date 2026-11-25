@@ -18,9 +18,13 @@ A phone web app that reads the hills and speed limits on your route and shows th
 | Climbing | Steady throttle and let the speed sag a few mph. Don't chase it |
 | Near the top | Ease off early and let the truck roll over the crest |
 | Downhill | Off the gas and let it roll up to the limit |
-| Lower limit or a turn ahead | Coast down early instead of braking late |
+| Lower limit or a turn ahead | Slow down starting about 100 m (330 ft) before it |
 
 The colors mean: **green** = on target, **white** = speed up gently, **amber** = ease off.
+
+**The small number under the goal** is where to be 4 seconds from now. It steps up gently toward the goal, in smaller steps on climbs, and it won't build speed you'd just brake away for a turn or lower limit ahead. When you need to slow down, it counts down instead. It hides when you're at the goal.
+
+**Your current speed (top right) turns red** with "easy on the gas" when you accelerate harder than about 3 mph per second (0–40 in ~15 sec). You can change that in Settings → Acceleration warning.
 
 The speed-limit sign shows where the limit came from: **posted** (mapped from a real sign), **est. from road type** (a guess based on the kind of road), or **unknown** (your setting). Tap **−5 / +5** to correct it. Your correction sticks until the road changes.
 

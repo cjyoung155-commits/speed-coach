@@ -116,6 +116,9 @@ h2 { font-size: 20px; line-height: 1.2; margin: 0 0 12px; text-wrap: balance; }
 .now { text-align: right; }
 .now b { display: block; font-size: 40px; line-height: 1; font-weight: 700; font-variant-numeric: tabular-nums; }
 .now span { color: var(--muted); font-size: 13px; }
+.now b, .now span { transition: color .2s; }
+.now.hard b, .now.hard span { color: var(--red); }
+.now.hard span { font-weight: 700; }
 
 .d-main { flex: 1; display: flex; flex-direction: column; justify-content: center; min-height: 0; }
 .target { text-align: center; padding: 6px 0 2px; border-radius: 28px; transition: background-color .4s; }
@@ -125,7 +128,15 @@ h2 { font-size: 20px; line-height: 1.2; margin: 0 0 12px; text-wrap: balance; }
   font-variant-numeric: tabular-nums; transition: color .3s;
 }
 .t-unit { color: var(--muted); font-size: 18px; font-weight: 600; margin-top: 2px; }
-.t-hint { margin-top: 10px; font-size: 19px; font-weight: 700; min-height: 1.4em; }
+.t-step {
+  display: inline-flex; align-items: baseline; gap: 6px; margin-top: 8px; padding: 4px 14px 5px;
+  border-radius: 999px; background: rgba(233, 237, 242, .07); font-variant-numeric: tabular-nums;
+}
+.t-step span { font-size: 22px; font-weight: 800; color: var(--muted); }
+.t-step b { font-size: 34px; line-height: 1; font-weight: 800; }
+.t-step small { font-size: 13px; color: var(--muted); font-weight: 600; }
+.t-step.off { visibility: hidden; }
+.t-hint { margin-top: 8px; font-size: 19px; font-weight: 700; min-height: 1.4em; }
 .state-on { background: rgba(51, 224, 122, .10); }
 .state-on .t-num, .state-on .t-hint { color: var(--green); }
 .state-over .t-num, .state-over .t-hint { color: var(--amber); }
@@ -153,7 +164,12 @@ h2 { font-size: 20px; line-height: 1.2; margin: 0 0 12px; text-wrap: balance; }
 @media (orientation: landscape) and (max-height: 560px) {
   .d-main { flex-direction: row; align-items: center; gap: 18px; }
   .target { flex: 1.1; }
-  .t-num { font-size: clamp(110px, 30vh + 40px, 220px); }
+  .t-num { font-size: clamp(90px, 28vh + 20px, 200px); }
+  .t-label { display: none; }
+  .t-unit { font-size: 14px; margin-top: 0; }
+  .t-step { margin-top: 4px; padding: 2px 12px 3px; }
+  .t-step b { font-size: 26px; }
+  .t-hint { margin-top: 4px; font-size: 17px; }
   .d-side { flex: 1; }
   .msg { text-align: left; margin-top: 0; }
   .ahead-fig { height: 80px; }

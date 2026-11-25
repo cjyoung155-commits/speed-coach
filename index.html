@@ -11,7 +11,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="icon" type="image/png" href="icons/icon-192.png">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=2">
 <title>Speed Coach</title>
 </head>
 <body>
@@ -73,6 +73,10 @@
       <div><b>Speed when the limit is unknown</b><small>Used only when the map has nothing</small></div>
       <div class="stepper"><button type="button" data-d="-1" aria-label="less">−</button><output></output><button type="button" data-d="1" aria-label="more">+</button></div>
     </div>
+    <div class="row" data-key="accelWarn" data-min="2" data-max="5" data-step="0.5" data-dec="1">
+      <div><b>Acceleration warning</b><small>mph gained per second before your speed turns red · 3 ≈ 0–40 in 15 sec</small></div>
+      <div class="stepper"><button type="button" data-d="-1" aria-label="less">−</button><output></output><button type="button" data-d="1" aria-label="more">+</button></div>
+    </div>
     <div class="row">
       <div><b>Voice cues</b><small>“Hill ahead. Build to 55.”</small></div>
       <button type="button" id="voiceSetting" class="toggle" aria-pressed="true">On</button>
@@ -104,7 +108,7 @@
         </div>
       </div>
     </div>
-    <div class="now"><b id="speedVal">--</b><span>mph now</span></div>
+    <div class="now" id="nowBox"><b id="speedVal">--</b><span id="nowLabel">mph now</span></div>
   </div>
 
   <div class="d-main">
@@ -112,6 +116,7 @@
       <div class="t-label">Drive</div>
       <div class="t-num" id="targetVal">--</div>
       <div class="t-unit">mph</div>
+      <div class="t-step" id="stepBox" aria-live="off"><span id="stepArrow">↑</span><b id="stepVal">--</b><small>in 4 sec</small></div>
       <div class="t-hint" id="hint">Waiting for GPS…</div>
     </div>
     <div class="d-side">
@@ -132,7 +137,7 @@
   <div id="banner" class="banner" hidden></div>
 </main>
 
-<script src="core.js"></script>
-<script src="app.js"></script>
+<script src="core.js?v=2"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>

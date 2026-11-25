@@ -19,6 +19,9 @@
   const DESC_IN = -2.5, DESC_OUT = -1.5;
   const SCAN_STEP = 25;         // m
   const COAST_DECEL = 0.55;     // m/s² — rough coast-in-gear deceleration for a pickup
+  const SLOW_CUE_M = 100;       // start the turn / lower-limit cue this far out
+  const STEP_SECS = 4;          // the small "next 4 seconds" speed looks this far ahead
+  const EASY_DECEL = 0.8;       // m/s² — coast plus light braking; caps speed-ups before a slow point
 
   // Estimated US limits by OpenStreetMap road class, used when no sign is mapped.
   const EST_LIMITS = {
@@ -347,7 +350,7 @@
     else if (lim) { base = lim.mph; src = lim.src; }
     else { base = S.fallback; src = 'default'; }
     const cruise = Math.max(5, base - S.eco);
-    const out = { target: cruise, base, src, mode: 'cruise', msg: '', ahead: '', cue: null, holdBelow: false, gNow: 0 };
+    const out = { target: cruise, base, src, mode: 'cruise', msg: '', ahead: '', cue: null, holdBelow: false, gNow: 0, slowAhead: [], dist: null };
 
     const remaining = route.total - d;
     if (remaining < 40) {
@@ -372,23 +375,28 @@
       out.ahead = 'No big hills in the next ' + fmtDist(Math.min(1200, remaining));
     }
 
-    // 1) Things you must slow for: a turn or a lower limit. Coast into them.
+    // 1) Things you must slow for: a turn or a lower limit, cued ~100 m out.
+    //    Everything within 900 m is also listed in slowAhead so the step speed can
+    //    avoid building speed you'd just have to brake away.
     const cands = [];
+    out.slowAhead = [];
     const man = nextSlowManeuver(route, d, 900);
     if (man) {
-      const dist = man.d - d;
-      // Once coasting toward it, stay coasting even though the needed distance shrinks as you slow.
-      const sticky = (prev === 'turn' || prev === 'arriving') && dist <= 400;
-      if (sticky || dist <= coastDistance(speed, man.slow) + 40) {
+      const dist = man.d - d, mph = Math.min(man.slow, base);
+      out.slowAhead.push({ dist, mph });
+      if (dist <= SLOW_CUE_M) {
         const what = man.type === 'arrive' ? 'Arriving' :
           (man.type === 'roundabout' || man.type === 'rotary') ? 'Roundabout ahead' : 'Turn ahead';
-        cands.push({ mode: man.type === 'arrive' ? 'arriving' : 'turn', target: Math.min(man.slow, base), msg: what + ' — coast down', cue: null });
+        cands.push({ mode: man.type === 'arrive' ? 'arriving' : 'turn', target: mph, dist, msg: what + ' — slow to ' + mph, cue: null });
       }
     }
     if (ctx.override == null) {
       const drop = nextLowerLimit(route, ctx.limits, d, base, 800);
-      if (drop && (prev === 'slowdown' || drop.d - d <= coastDistance(speed, drop.mph) + 20)) {
-        cands.push({ mode: 'slowdown', target: drop.mph, msg: 'Limit ' + drop.mph + ' in ' + fmtDist(drop.d - d) + ' — coast down', cue: 'Speed limit ' + drop.mph + ' ahead. Coast down.' });
+      if (drop) {
+        out.slowAhead.push({ dist: drop.d - d, mph: drop.mph });
+        if (prev === 'slowdown' || drop.d - d <= SLOW_CUE_M) {
+          cands.push({ mode: 'slowdown', target: drop.mph, dist: drop.d - d, msg: 'Limit ' + drop.mph + ' in ' + fmtDist(drop.d - d) + ' — slow down', cue: 'Speed limit ' + drop.mph + ' ahead.' });
+        }
       }
     }
     if (cands.length) {
@@ -449,8 +457,58 @@
     if (s.mode === 'arrived') return 'on';
     if (Math.abs(diff) <= 2) return 'on';
     if (diff > 2) return 'over';
-    if (s.holdBelow) return (s.mode === 'climb' || s.mode === 'crest') ? 'hold' : 'on';
+    if (s.mode === 'climb' || s.mode === 'crest') return diff >= -6 ? 'hold' : 'under';
+    if (s.holdBelow) return 'on';
     return 'under';
+  }
+
+  /**
+   * The small "next 4 seconds" speed: where to be STEP_SECS from now.
+   * Going up, it ramps gently (slower on climbs) and never builds speed you'd have to
+   * brake away for a turn or lower limit ahead. Going down, it counts toward the goal,
+   * faster when a turn or limit is close. Returns {mph, dir:'up'|'down'} or null at the goal.
+   * accelLimit: the "too fast" threshold in mph per second.
+   */
+  function stepSpeed(s, speed, accelLimit) {
+    if (!s || s.mode === 'arrived') return null;
+    speed = Math.max(0, speed || 0);
+    const goal = s.target;
+    const vMs = speed / MPS_TO_MPH;
+    // Highest speed worth having now, given slow points ahead.
+    let cap = Infinity;
+    for (const c of (s.slowAhead || [])) {
+      const vt = c.mph / MPS_TO_MPH;
+      cap = Math.min(cap, Math.sqrt(vt * vt + 2 * EASY_DECEL * Math.max(0, c.dist)) * MPS_TO_MPH);
+    }
+    const ceiling = Math.max(Math.min(goal, cap), Math.min(goal, 5));
+    if (speed < ceiling - 2) {
+      const hill = s.mode === 'climb' || s.mode === 'crest';
+      if (hill && speed >= goal - 6) return null;          // a little sag on a climb is the plan
+      if (!hill && s.holdBelow) return null;               // slowing for a turn/limit/downhill: under is fine
+      const g = Math.max(0, s.gNow || 0);
+      const rate = Math.max(0.75, (accelLimit || 3) * 0.8 - 0.3 * g);   // mph per second
+      return { mph: Math.round(Math.min(ceiling, speed + rate * STEP_SECS)), dir: 'up' };
+    }
+    if (speed > ceiling + 2) {
+      let rate = COAST_DECEL * MPS_TO_MPH;                               // ~1.2 mph per second
+      if (s.dist != null && s.dist > 1) {
+        const vt = goal / MPS_TO_MPH;
+        rate = Math.max(rate, (vMs * vMs - vt * vt) / (2 * s.dist) * MPS_TO_MPH);
+      }
+      return { mph: Math.round(Math.max(ceiling, speed - rate * STEP_SECS)), dir: 'down' };
+    }
+    return null;
+  }
+
+  /** Acceleration (mph per second) from recent [{t: seconds, v: mph}] samples; null if too few. */
+  function accelFrom(samples) {
+    if (!samples || samples.length < 3) return null;
+    const t0 = samples[0].t, span = samples[samples.length - 1].t - t0;
+    if (span < 1.5) return null;
+    let n = 0, st = 0, sv = 0, stt = 0, stv = 0;
+    for (const p of samples) { const t = p.t - t0; n++; st += t; sv += p.v; stt += t * t; stv += t * p.v; }
+    const den = n * stt - st * st;
+    return den > 0 ? (n * stv - st * sv) / den : null;
   }
 
   const api = {
@@ -458,7 +516,8 @@
     haversine, buildRoute, snap, segIndexAt, pointAt, sampleRoute, sampleStepFor,
     buildProfile, flatProfile, elevAt, gradeAvg, scanAhead,
     parseMaxspeed, buildLimits, limitAt, nextLowerLimit, nextSlowManeuver, coastDistance,
-    slowSpeedFor, fmtDist, fmtGrade, suggest, speedState
+    slowSpeedFor, fmtDist, fmtGrade, suggest, speedState, stepSpeed, accelFrom,
+    SLOW_CUE_M, STEP_SECS
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SpeedCore = api;

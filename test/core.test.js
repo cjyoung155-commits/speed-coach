@@ -58,7 +58,7 @@ t('hill ahead: build to the limit', () => {
 });
 t('on the climb: let it sag a few mph', () => {
   const s = at(2500, 55); assert.strictEqual(s.mode, 'climb', s.msg);
-  assert(s.target >= 50 && s.target <= 53, s.target); assert.strictEqual(C.speedState(45, s), 'hold');
+  assert(s.target >= 50 && s.target <= 53, s.target); assert.strictEqual(C.speedState(48, s), 'hold');
 });
 t('near the top: ease off', () => {
   const s = at(2950, 52, { prevMode: 'climb' }); assert.strictEqual(s.mode, 'crest', s.msg + ' g=' + s.gNow);
@@ -67,9 +67,9 @@ t('near the top: ease off', () => {
 t('downhill: off the gas, roll to the limit', () => {
   const s = at(3600, 48); assert.strictEqual(s.mode, 'descent', s.msg); assert.strictEqual(s.target, 55);
 });
-t('limit drop: coast down early, not too early', () => {
-  assert.notStrictEqual(at(5450, 55).mode, 'slowdown');
-  const s = at(5650, 55); assert.strictEqual(s.mode, 'slowdown', s.msg); assert.strictEqual(s.target, 25);
+t('limit drop: cue starts ~100 m before', () => {
+  assert.notStrictEqual(at(5880, 55).mode, 'slowdown');
+  const s = at(5910, 55); assert.strictEqual(s.mode, 'slowdown', s.msg); assert.strictEqual(s.target, 25);
   assert.strictEqual(C.speedState(20, s), 'on');
 });
 t('slowdown stays on while coasting down', () => {
@@ -85,9 +85,34 @@ t('crest stays on over the top', () => {
 t('manual override replaces the limit', () => {
   const s = at(8000, 30, { override: 35 }); assert.strictEqual(s.base, 35); assert.strictEqual(s.src, 'manual');
 });
-t('turn: coast down shortly before', () => {
-  assert.notStrictEqual(at(6800, 25).mode, 'turn');
-  const s = at(6920, 25); assert.strictEqual(s.mode, 'turn', s.msg); assert.strictEqual(s.target, 15);
+t('turn: cue starts ~100 m before', () => {
+  assert.notStrictEqual(at(6880, 25).mode, 'turn');
+  const s = at(6910, 25); assert.strictEqual(s.mode, 'turn', s.msg); assert.strictEqual(s.target, 15);
+});
+t('step speed: gentle ramp up on flat road', () => {
+  const st = C.stepSpeed(at(1000, 15), 15, 3); assert.deepStrictEqual(st, { mph: 25, dir: 'up' });
+});
+t('step speed: smaller steps on a climb', () => {
+  const s = at(2500, 15), st = C.stepSpeed(s, 15, 3);
+  assert(st.dir === 'up' && st.mph >= 18 && st.mph <= 20, JSON.stringify(st));
+  assert.strictEqual(C.speedState(15, s), 'under');
+});
+t('step speed: hidden when on target', () => { assert.strictEqual(C.stepSpeed(at(1000, 54), 54, 3), null); });
+t('step speed: no push while sagging a little on a climb', () => {
+  const s = at(2500, 49); assert.strictEqual(C.speedState(49, s), 'hold'); assert.strictEqual(C.stepSpeed(s, 49, 3), null);
+});
+t('step speed: counts down into a turn', () => {
+  const st = C.stepSpeed(at(6910, 30), 30, 3); assert.deepStrictEqual(st, { mph: 23, dir: 'down' });
+});
+t('step speed: no building speed right before a turn', () => {
+  const s = { target: 55, mode: 'cruise', gNow: 0, slowAhead: [{ dist: 150, mph: 15 }], dist: null };
+  assert.deepStrictEqual(C.stepSpeed(s, 50, 3), { mph: 45, dir: 'down' });
+  assert.deepStrictEqual(C.stepSpeed(s, 20, 3), { mph: 30, dir: 'up' });
+});
+t('acceleration estimate', () => {
+  const a = C.accelFrom([0, 1, 2, 3].map(t => ({ t, v: 10 + 3 * t })));
+  assert(Math.abs(a - 3) < 1e-9, a);
+  assert.strictEqual(C.accelFrom([{ t: 0, v: 1 }, { t: 1, v: 2 }]), null);
 });
 t('arrival', () => { assert.strictEqual(at(9980, 5).mode, 'arrived'); });
 t('no hill data: still works', () => {

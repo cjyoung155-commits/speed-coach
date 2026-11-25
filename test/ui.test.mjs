@@ -61,8 +61,11 @@ await page.click('#simBtn');
 const seen = {}; const modes = []; const shotFor = ['preclimb', 'climb', 'crest', 'descent', 'slowdown', 'turn', 'arrived'];
 let shot = 4;
 for (let i = 0; i < 700; i++) {
-  const st = await page.evaluate(() => { const d = window.__speedCoach.drive; return d.last && { mode: d.last.mode, target: d.last.target, d: d.d, v: d.speed, cls: document.getElementById('targetBox').className }; });
+  const st = await page.evaluate(() => { const d = window.__speedCoach.drive; return d.last && { mode: d.last.mode, target: d.last.target, d: d.d, v: d.speed, step: d.step, hard: d.hard, stepShown: !document.getElementById('stepBox').classList.contains('off'), stepText: document.getElementById('stepVal').textContent }; });
   if (st) {
+    if (st.step && st.step.dir === 'up' && st.stepShown && !seen.stepUp) { seen.stepUp = st; await page.screenshot({ path: `${OUT}/${shot++}-drive-step-up.png` }); }
+    if (st.step && st.step.dir === 'down' && st.stepShown && !seen.stepDown) { seen.stepDown = st; await page.screenshot({ path: `${OUT}/${shot++}-drive-step-down.png` }); }
+    if (st.hard) seen.simHard = true;
     if (modes[modes.length - 1] !== st.mode) modes.push(st.mode);
     if (!seen[st.mode]) {
       seen[st.mode] = st;
@@ -74,6 +77,11 @@ for (let i = 0; i < 700; i++) {
 }
 console.log('  mode sequence: ' + modes.join(' → '));
 for (const m of shotFor) check(!!seen[m], 'test drive reached "' + m + '"' + (seen[m] ? ` at ${Math.round(seen[m].d)} m, target ${seen[m].target}` : ''));
+check(seen.turn && seen.turn.d > 6870, 'turn cue starts about 100 m out (at ' + (seen.turn && Math.round(seen.turn.d)) + ' m, turn at 7000 m)');
+check(seen.slowdown && seen.slowdown.d > 5870, 'limit-drop cue starts about 100 m out (at ' + (seen.slowdown && Math.round(seen.slowdown.d)) + ' m, drop at 6000 m)');
+check(seen.stepUp && +seen.stepUp.stepText > seen.stepUp.v, '4-second step shows above current speed when building: ' + (seen.stepUp && seen.stepUp.stepText + ' vs ' + Math.round(seen.stepUp.v)));
+check(seen.stepDown && +seen.stepDown.stepText < seen.stepDown.v, '4-second step counts down when slowing: ' + (seen.stepDown && seen.stepDown.stepText + ' vs ' + Math.round(seen.stepDown.v)));
+check(!seen.simHard, 'a driver following the step number never trips the acceleration warning');
 { const flaps = modes.filter((m, i) => m !== 'cruise' && modes[i + 2] === m); check(!flaps.length, 'no mode flapping' + (flaps.length ? ': ' + flaps.join(', ') : '')); }
 
 await page.setViewportSize({ width: 844, height: 390 });
@@ -87,17 +95,27 @@ await page.setViewportSize({ width: 390, height: 844 });
 await page.click('#startBtn');
 const C = require('../core.js');
 const route = C.buildRoute(fx.osrm.routes[0]);
+const disp = [];
 for (let d = 900, k = 0; d <= 1600; d += 22, k++) {      // ~22 m per fix ≈ 49 mph at 1 fix/s
   const p = C.pointAt(route, d);
   await ctx.setGeolocation({ latitude: p[0], longitude: p[1], accuracy: 6 });
-  await page.waitForTimeout(1000);
-  if (k === 3) break;
+  for (let j = 0; j < 10; j++) { await page.waitForTimeout(100); if (k >= 2) disp.push(await page.evaluate(() => window.__speedCoach.drive.dispD)); }
+  if (k === 4) break;
 }
 await page.waitForTimeout(300);
+{ const distinct = new Set(disp.map(v => Math.round(v))).size; let back = 0; for (let i = 1; i < disp.length; i++) if (disp[i] < disp[i - 1] - 1) back++;
+  check(distinct >= 12 && back === 0, `graph glides between fixes (${distinct} distinct positions in ${disp.length} samples, ${back} backward steps)`); }
 const live = await page.evaluate(() => ({ speed: document.getElementById('speedVal').textContent, target: document.getElementById('targetVal').textContent, lim: document.getElementById('limitVal').textContent, cls: document.getElementById('targetBox').className }));
 console.log('  live GPS: ' + JSON.stringify(live));
 check(+live.target === 55 && +live.lim === 55, 'live GPS shows a target and the posted limit');
 check(+live.speed > 35 && +live.speed < 65, 'speed derived from moving location (~49 mph): ' + live.speed);
+// hard launch: +5 mph every second from a near stop
+{ let d = 1700; const v0 = 8;
+  for (let k = 0; k < 6; k++) { d += (v0 + 5 * k) / 2.2369; const p = C.pointAt(route, d); await ctx.setGeolocation({ latitude: p[0], longitude: p[1], accuracy: 6 }); await page.waitForTimeout(1000); }
+  const hard = await page.evaluate(() => ({ cls: document.getElementById('nowBox').className, label: document.getElementById('nowLabel').textContent, a: window.__speedCoach.drive.accel }));
+  check(/hard/.test(hard.cls) && /easy on the gas/.test(hard.label), 'hard acceleration turns the corner speed red (' + (hard.a && hard.a.toFixed(1)) + ' mph/s)');
+  await page.screenshot({ path: OUT + '/x-hard-accel.png' });
+}
 await page.click('#limUp');
 check((await page.textContent('#limitVal')).trim() === '60' && /manual/.test(await page.getAttribute('#sign', 'class')), '+5 sets a manual limit');
 await page.screenshot({ path: OUT + '/y-live.png' });
