@@ -20,6 +20,7 @@
   const SCAN_STEP = 25;         // m
   const COAST_DECEL = 0.55;     // m/s² — rough coast-in-gear deceleration for a pickup
   const SLOW_CUE_M = 100;       // start the turn / lower-limit cue this far out
+  const LIGHT_CUE_M = 150;      // "light ahead" cue distance
   const STEP_SECS = 4;          // the small "next 4 seconds" speed looks this far ahead
   const EASY_DECEL = 0.8;       // m/s² — coast plus light braking; caps speed-ups before a slow point
 
@@ -63,29 +64,54 @@
     if (pts.length === 1) pts.push(pts[0].slice());
     const cum = new Float64Array(pts.length);
     for (let i = 1; i < pts.length; i++) cum[i] = cum[i - 1] + haversine(pts[i - 1], pts[i]);
-    const leg = (r.legs && r.legs[0]) || {};
-    const nodes = leg.annotation && leg.annotation.nodes;
+    const legs = (r && r.legs) || [];
+    // OpenStreetMap node pair for every geometry segment (legs join at via points).
+    let pairs = [];
+    for (const leg of legs) {
+      const nodes = leg.annotation && leg.annotation.nodes;
+      if (!nodes || nodes.length < 2) { pairs = null; break; }
+      for (let j = 0; j < nodes.length - 1; j++) pairs.push([nodes[j], nodes[j + 1]]);
+    }
     const route = {
       pts, cum,
       total: pts.length ? cum[pts.length - 1] : 0,
-      duration: r.duration || 0,
-      segNodes: nodes && nodes.length === pts.length ? nodes : null,
+      duration: (r && r.duration) || 0,
+      segPairs: pairs && pairs.length === pts.length - 1 ? pairs : null,
       maneuvers: []
     };
     let hint = 0;
-    for (const st of (leg.steps || [])) {
-      const m = st.maneuver;
-      if (!m || !m.location) continue;
-      const slow = slowSpeedFor(m.type, m.modifier);
-      let d;
-      if (m.type === 'arrive') d = route.total;
-      else {
-        const sn = snap(route, [m.location[1], m.location[0]], hint, 0, pts.length);
-        hint = sn.idx; d = sn.d;
+    legs.forEach((leg, li) => {
+      const last = li === legs.length - 1;
+      for (const st of (leg.steps || [])) {
+        const m = st.maneuver;
+        if (!m || !m.location) continue;
+        if ((m.type === 'arrive' && !last) || (m.type === 'depart' && li > 0)) continue;   // via points
+        const slow = slowSpeedFor(m.type, m.modifier);
+        let d;
+        if (m.type === 'arrive') d = route.total;
+        else {
+          const sn = snap(route, [m.location[1], m.location[0]], hint, 0, pts.length);
+          hint = sn.idx; d = sn.d;
+        }
+        route.maneuvers.push({ d, type: m.type, modifier: m.modifier || '', name: st.name || '', slow });
       }
-      route.maneuvers.push({ d, type: m.type, modifier: m.modifier || '', name: st.name || '', slow });
-    }
+    });
     return route;
+  }
+
+  /** A bare route from [lat, lon] points (saved routes, tests). */
+  function routeFromPoints(pts, extra) {
+    const cum = new Float64Array(pts.length);
+    for (let i = 1; i < pts.length; i++) cum[i] = cum[i - 1] + haversine(pts[i - 1], pts[i]);
+    return Object.assign({ pts, cum, total: pts.length ? cum[pts.length - 1] : 0, duration: 0, segPairs: null, maneuvers: [] }, extra || {});
+  }
+
+  /** All OpenStreetMap node ids along the route. */
+  function routeNodeIds(route) {
+    if (!route.segPairs) return [];
+    const ids = new Set();
+    for (const p of route.segPairs) { if (p[0] > 0) ids.add(p[0]); if (p[1] > 0) ids.add(p[1]); }
+    return Array.from(ids);
   }
 
   /**
@@ -248,7 +274,7 @@
   function buildLimits(route, ways) {
     const n = route.pts.length;
     const segs = new Array(Math.max(0, n - 1)).fill(null);
-    if (route.segNodes && ways && ways.length) {
+    if (route.segPairs && ways && ways.length) {
       const map = new Map();
       for (const w of ways) {
         if (!w || !w.nodes || !w.tags || !w.tags.highway) continue;
@@ -259,7 +285,7 @@
         }
       }
       for (let i = 0; i < n - 1; i++) {
-        const hit = map.get(route.segNodes[i] + '_' + route.segNodes[i + 1]);
+        const hit = map.get(route.segPairs[i][0] + '_' + route.segPairs[i][1]);
         if (!hit) continue;
         const t = hit.w.tags;
         const dirTag = hit.fwd ? t['maxspeed:forward'] : t['maxspeed:backward'];
@@ -434,6 +460,14 @@
         cue: 'Downhill. Off the gas.'
       });
     }
+    const light = nextSignal(ctx.signals, d, LIGHT_CUE_M);
+    if (light != null) {
+      const ld = Math.max(0, light - d);
+      return Object.assign(out, {
+        mode: 'light', target: cruise, holdBelow: true, light: ld,
+        msg: (ld < 30 ? 'Light here' : 'Light in ' + fmtDist(ld)) + ' — be ready to coast', cue: 'Light ahead.'
+      });
+    }
     if (scan.climb && scan.climb.at <= 500 && scan.climb.len >= 150) {
       return Object.assign(out, {
         mode: 'preclimb', target: base,
@@ -520,7 +554,7 @@
     const over = state === 'over', on = state === 'on';
     let hint, msg;
     switch (s.mode) {
-      case 'turn': case 'arriving': case 'slowdown': case 'predescent':
+      case 'turn': case 'arriving': case 'slowdown': case 'predescent': case 'light':
         hint = over ? 'Lift off the gas' : 'On target'; msg = s.msg; break;
       case 'crest':
         hint = over ? 'Lift off the gas' : on ? 'On target' : 'Let it roll'; msg = s.msg; break;
@@ -564,12 +598,244 @@
     return den > 0 ? (n * stv - st * sv) / den : null;
   }
 
+  // ---------------------------------------------------------------- traffic lights
+
+  /** Distances along the route of mapped traffic signals (two nodes of one intersection merged). */
+  function buildSignals(route, signalIds) {
+    if (!route.segPairs || !signalIds || !signalIds.size) return [];
+    const out = [], P = route.segPairs;
+    for (let i = 0; i < P.length; i++) if (signalIds.has(P[i][0])) out.push(route.cum[i]);
+    if (P.length && signalIds.has(P[P.length - 1][1])) out.push(route.cum[P.length]);
+    out.sort((a, b) => a - b);
+    const merged = [];
+    for (const d of out) if (!merged.length || d - merged[merged.length - 1] > 40) merged.push(Math.round(d));
+    return merged;
+  }
+
+  function nextSignal(signals, d, range) {
+    if (!signals) return null;
+    for (const L of signals) { if (L >= d - 5 && L <= d + range) return L; if (L > d + range) break; }
+    return null;
+  }
+
+  /**
+   * Notices stops at lights. push(tMs, d, mph) on every fix; manual(tMs, d) when you tap the button.
+   * A stop counts if a light (mapped or learned) is just ahead, or you tapped. Creeping up in a
+   * queue at the same light is merged into one stop. stops: [{light (m), t (ms), dur (s), manual}]
+   */
+  function stopTracker(lights) {
+    const T = { stops: [], cur: null, lights: (lights || []).slice().sort((a, b) => a - b) };
+    const lightAt = d => { for (const L of T.lights) { if (L >= d - 40 && L <= d + 250) return L; if (L > d + 250) break; } return null; };
+    function close(t) {
+      const c = T.cur; T.cur = null;
+      const dur = (t - c.t0) / 1000;
+      const pos = c.light != null ? c.light : c.d;
+      const prev = T.stops[T.stops.length - 1];
+      if (prev && c.t0 - (prev.t + prev.dur * 1000) < 25000 && pos - prev.light > -40 && pos - prev.light < 150) {
+        prev.dur = Math.round((prev.dur + dur) * 10) / 10; prev.manual = prev.manual || c.manual; return;
+      }
+      if (dur < 3 || (c.light == null && !c.manual)) return;
+      T.stops.push({ light: Math.round(pos), t: c.t0, dur: Math.round(dur * 10) / 10, manual: c.manual, mapped: c.light != null });
+    }
+    T.push = (t, d, v) => {
+      if (T.cur) { if (v > 5) close(t); }
+      else if (v < 2) T.cur = { t0: t, d, light: lightAt(d), manual: false };
+      return T.cur;
+    };
+    T.manual = (t, d) => { if (!T.cur) T.cur = { t0: t, d, light: lightAt(d), manual: true }; else T.cur.manual = true; };
+    T.finish = t => { if (T.cur) close(t); return T.stops; };
+    return T;
+  }
+
+  // ---------------------------------------------------------------- learning which route is best
+
+  const DAY_MIN = 1440;
+  function minuteOfDay(ms) { const x = new Date(ms); return x.getHours() * 60 + x.getMinutes() + x.getSeconds() / 60; }
+  function isWeekend(ms) { const g = new Date(ms).getDay(); return g === 0 || g === 6; }
+  function circMin(a, b) { const x = Math.abs(a - b) % DAY_MIN; return Math.min(x, DAY_MIN - x); }
+
+  /** When a trip passed distance L (ms), from its timeline [[d, tMs], ...]. */
+  function passTime(trip, L) {
+    const tl = trip.tl || [];
+    for (let i = 1; i < tl.length; i++) {
+      if (tl[i][0] >= L) {
+        const a = tl[i - 1], b = tl[i];
+        if (a[0] > L) return null;
+        const f = b[0] > a[0] ? (L - a[0]) / (b[0] - a[0]) : 0;
+        return a[1] + (b[1] - a[1]) * f;
+      }
+    }
+    return null;
+  }
+
+  /** Average wait (s) at light L for trips that passed it near `minute` on the same kind of day. */
+  function lightWait(trips, L, minute, weekend) {
+    const passes = [];
+    for (const tr of trips) {
+      if (!((tr.fromD || 0) <= L && tr.reached > L + 10)) continue;
+      const pt = passTime(tr, L);
+      if (pt == null) continue;
+      let wait = 0, stopped = 0;
+      for (const st of tr.stops || []) if (Math.abs(st.light - L) < 60) { wait += st.dur; stopped = 1; }
+      passes.push({ min: minuteOfDay(pt), we: isWeekend(pt), wait, stopped });
+    }
+    const pick = (list, win) => list.filter(p => circMin(p.min, minute) <= win);
+    const sameDay = passes.filter(p => p.we === weekend);
+    let m = pick(sameDay, 45);
+    if (m.length < 3) m = pick(sameDay, 120);
+    if (m.length < 3) m = sameDay.length >= 3 ? sameDay : passes;
+    if (!m.length) return { wait: null, stops: null, n: 0 };
+    return { wait: m.reduce((a, p) => a + p.wait, 0) / m.length, stops: m.reduce((a, p) => a + p.stopped, 0) / m.length, n: m.length };
+  }
+
+  /** Typical driving speed on a route (m/s) from its trips; 11 m/s (~25 mph) if unknown. */
+  function typicalSpeed(trips) {
+    let dist = 0, time = 0;
+    for (const tr of trips) {
+      const tl = tr.tl || [];
+      if (tl.length > 1) { dist += tl[tl.length - 1][0] - tl[0][0]; time += (tl[tl.length - 1][1] - tl[0][1]) / 1000; }
+    }
+    return time > 60 && dist > 0 ? Math.max(4, dist / time) : 11;
+  }
+
+  /**
+   * Expected time stopped at lights from fromD to toD if you pass fromD at time `atMs`.
+   * {wait (s), stops, minN (fewest trips behind any light), lights}
+   */
+  function routeEstimate(lights, trips, fromD, toD, atMs, speed) {
+    let wait = 0, stops = 0, minN = Infinity, count = 0;
+    for (const L of lights || []) {
+      if (L < fromD || L >= toD) continue;
+      const t = atMs + (L - fromD) / speed * 1000;
+      const w = lightWait(trips, L, minuteOfDay(t), isWeekend(t));
+      count++;
+      minN = Math.min(minN, w.n);
+      wait += w.wait == null ? 15 : w.wait;       // unseen light: assume an average 15 s
+      stops += w.stops == null ? 0.5 : w.stops;
+    }
+    return { wait, stops, minN: count ? minN : Infinity, lights: count };
+  }
+
+  function seeded(str) { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return ((h >>> 0) % 10000) / 10000; }
+  function fmtSec(s) { s = Math.round(s); return s < 60 ? s + ' sec' : Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0') + ' min'; }
+  const FULL_TRIPS = 8, MIN_TRIPS = 3;
+
+  /**
+   * Pick between saved routes to the same place, by least expected time stopped at lights.
+   * routes: [{id, name, total, lights}], tripsBy: {id: trips}. While any route has fewer than
+   * 8 trips, about 1 in 4 days it suggests the least-driven route instead, to keep learning.
+   */
+  function recommend(routes, tripsBy, nowMs, seed) {
+    const rows = routes.map(r => {
+      const trips = tripsBy[r.id] || [];
+      const full = trips.filter(t => t.reached >= r.total * 0.8).length;
+      const est = routeEstimate(r.lights, trips, 0, r.total, nowMs, typicalSpeed(trips));
+      return { id: r.id, name: r.name, trips: full, wait: est.wait, stops: est.stops, ready: full >= MIN_TRIPS };
+    });
+    if (rows.length === 1) return { pick: rows[0].id, kind: 'only', text: '', rows };
+    const least = rows.slice().sort((a, b) => a.trips - b.trips)[0];
+    const ready = rows.filter(r => r.ready).sort((a, b) => a.wait - b.wait);
+    const learning = rows.some(r => r.trips < FULL_TRIPS);
+    if (ready.length < 2 || (learning && least.trips < FULL_TRIPS && seeded(seed) < 0.25 && least.id !== ready[0].id)) {
+      const kind = ready.length < 2 ? 'collecting' : 'learning';
+      return { pick: least.id, kind, rows,
+        text: 'Try ' + least.name + ' — still learning it (' + least.trips + ' of ' + FULL_TRIPS + ' trips)' };
+    }
+    const best = ready[0], next = ready[1], gain = next.wait - best.wait;
+    const clock = new Date(nowMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return { pick: best.id, kind: 'best', rows, gain,
+      text: gain < 10 ? 'About even around ' + clock + ' — ' + best.name + ' by a hair'
+        : 'Use ' + best.name + ' — about ' + fmtSec(gain) + ' less at lights around ' + clock };
+  }
+
+  /** Where route b leaves route a: {a: distance on a, b: distance on b}, or null if they never split. */
+  function splitPoint(a, b) {
+    for (let d = 0; d <= a.total; d += 25) {
+      if (snap(b, pointAt(a, d), null).dist > 50) {
+        const back = Math.max(0, d - 25);
+        return { a: back, b: snap(b, pointAt(a, back), null).d };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * While driving route `cur` before its split from each alternative: if, given when you'll
+   * reach the split, another route expects 15+ sec less at lights, suggest it.
+   * alts: [{route:{id,name,total,lights}, split:{a,b}}]
+   */
+  function liveCompare(cur, alts, tripsBy, d, nowMs) {
+    let best = null;
+    for (const alt of alts) {
+      const sp = alt.split;
+      if (!sp || d > sp.a - 80) continue;
+      const curTrips = tripsBy[cur.id] || [], altTrips = tripsBy[alt.route.id] || [];
+      const v = typicalSpeed(curTrips), atSplit = nowMs + (sp.a - d) / v * 1000;
+      const eC = routeEstimate(cur.lights, curTrips, sp.a, cur.total, atSplit, v);
+      const eA = routeEstimate(alt.route.lights, altTrips, sp.b, alt.route.total, atSplit, typicalSpeed(altTrips));
+      if (eC.minN < MIN_TRIPS || eA.minN < MIN_TRIPS) continue;
+      const gain = eC.wait - eA.wait;
+      if (gain >= 15 && (!best || gain > best.gain)) best = { id: alt.route.id, name: alt.route.name, gain, splitIn: sp.a - d };
+    }
+    return best;
+  }
+
+  // ---------------------------------------------------------------- saving routes compactly
+
+  const SRC = { posted: 'p', est: 'e' }, SRC_BACK = { p: 'posted', e: 'est' };
+  function packRoute(route, profile, limits, signals) {
+    const pts = [];
+    for (const p of route.pts) pts.push(Math.round(p[0] * 1e6) / 1e6, Math.round(p[1] * 1e6) / 1e6);
+    const lim = [];
+    let prevKey = null;
+    (limits ? limits.segs : []).forEach((sg, i) => {
+      const key = sg ? sg.mph + SRC[sg.src] : '';
+      if (key !== prevKey) { lim.push(sg ? [i, sg.mph, SRC[sg.src]] : [i, 0, '']); prevKey = key; }
+    });
+    return {
+      pts, dur: Math.round(route.duration),
+      pairs: route.segPairs ? [].concat.apply([], route.segPairs) : null,
+      man: route.maneuvers.map(m => [Math.round(m.d), m.type, m.modifier, m.slow]),
+      prof: !profile || profile.flat ? null : { step: profile.step, elev: Array.from(profile.elev, e => Math.round(e * 10) / 10) },
+      lim, sig: signals || []
+    };
+  }
+
+  function unpackRoute(p) {
+    const pts = [];
+    for (let i = 0; i < p.pts.length; i += 2) pts.push([p.pts[i], p.pts[i + 1]]);
+    const route = routeFromPoints(pts, { duration: p.dur || 0 });
+    if (p.pairs) { const pr = []; for (let i = 0; i < p.pairs.length; i += 2) pr.push([p.pairs[i], p.pairs[i + 1]]); route.segPairs = pr.length === pts.length - 1 ? pr : null; }
+    route.maneuvers = (p.man || []).map(m => ({ d: m[0], type: m[1], modifier: m[2], slow: m[3], name: '' }));
+    let profile;
+    if (p.prof) {
+      const elev = Float64Array.from(p.prof.elev);
+      profile = { total: route.total, step: p.prof.step, elev, climb: 0, descent: 0, maxGrade: 0, flat: false };
+      for (let i = 1; i < elev.length; i++) { const de = elev[i] - elev[i - 1]; if (de > 0) profile.climb += de; else profile.descent -= de; }
+      for (let d = 0; d + 200 <= route.total; d += 100) profile.maxGrade = Math.max(profile.maxGrade, Math.abs(gradeAvg(profile, d, d + 200)));
+    } else profile = flatProfile(route.total);
+    const segs = new Array(Math.max(0, pts.length - 1)).fill(null);
+    const runs = p.lim || [];
+    runs.forEach((run, k) => {
+      const end = k + 1 < runs.length ? runs[k + 1][0] : segs.length;
+      const v = run[1] ? { mph: run[1], src: SRC_BACK[run[2]] || 'est' } : null;
+      for (let i = run[0]; i < end; i++) segs[i] = v;
+    });
+    let posted = 0, known = 0;
+    for (let i = 0; i < segs.length; i++) { const L = route.cum[i + 1] - route.cum[i]; if (segs[i]) { known += L; if (segs[i].src === 'posted') posted += L; } }
+    const limits = { segs, postedShare: posted / (route.total || 1), knownShare: known / (route.total || 1) };
+    return { route, profile, limits, signals: p.sig || [] };
+  }
+
   const api = {
     MPS_TO_MPH, M_PER_MI, FT_PER_M, EST_LIMITS,
     haversine, buildRoute, snap, segIndexAt, pointAt, sampleRoute, sampleStepFor,
     buildProfile, flatProfile, elevAt, gradeAvg, scanAhead,
     parseMaxspeed, buildLimits, limitAt, nextLowerLimit, nextSlowManeuver, coastDistance,
     slowSpeedFor, fmtDist, fmtGrade, suggest, speedState, stepSpeed, speedCap, guide, accelFrom,
+    routeFromPoints, routeNodeIds, buildSignals, nextSignal, stopTracker,
+    minuteOfDay, isWeekend, passTime, lightWait, typicalSpeed, routeEstimate, recommend, splitPoint, liveCompare,
+    packRoute, unpackRoute, fmtSec, seeded, FULL_TRIPS, MIN_TRIPS,
     SLOW_CUE_M, STEP_SECS
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

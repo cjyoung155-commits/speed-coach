@@ -11,7 +11,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="icon" type="image/png" href="icons/icon-192.png">
-<link rel="stylesheet" href="style.css?v=3">
+<link rel="stylesheet" href="style.css?v=4">
 <title>Speed Coach</title>
 </head>
 <body>
@@ -31,6 +31,14 @@
     </div>
   </header>
 
+  <section id="myRoutes" class="myroutes">
+    <h2>My routes</h2>
+    <p id="myRoutesEmpty" class="note">Record the drives you make a lot, like each way you go to work. Speed Coach logs your stops at lights and learns which route spends the least time at them at each time of day.</p>
+    <div id="groups"></div>
+    <button id="recordBtn" class="btn ghost rec-btn" type="button"><span class="dot" aria-hidden="true"></span> Record a new route</button>
+  </section>
+
+  <h2 class="sub">Go somewhere else</h2>
   <form id="searchForm" class="search" autocomplete="off">
     <label for="q" class="sr">Destination</label>
     <input id="q" type="search" placeholder="Where to? Address, town or place" enterkeyhint="search">
@@ -57,6 +65,8 @@
     <p id="routeNote" class="note"></p>
     <button id="startBtn" class="btn primary" type="button">Start drive</button>
     <button id="simBtn" class="btn ghost" type="button">Test drive (simulated)</button>
+    <button id="saveRouteBtn" class="btn ghost" type="button">Save to My routes</button>
+    <button id="deleteRouteBtn" class="btn ghost danger" type="button" hidden>Delete this route</button>
   </section>
 
   <details class="settings card" id="settings">
@@ -84,6 +94,14 @@
     <div class="row">
       <div><b>Test drive speed</b><small>Fast-forward the simulated drive</small></div>
       <button type="button" id="simSetting" class="toggle">4×</button>
+    </div>
+    <div class="row">
+      <div><b>Back up routes &amp; trips</b><small>Save a file you can restore if the app's data is ever cleared</small></div>
+      <button type="button" id="backupBtn" class="toggle">Back up</button>
+    </div>
+    <div class="row">
+      <div><b>Restore from a backup</b><small id="backupNote">Adds any routes and trips from the file</small></div>
+      <label class="toggle filebtn">Restore<input id="restoreInput" type="file" accept="application/json,.json"></label>
     </div>
   </details>
 
@@ -128,6 +146,8 @@
     </div>
   </div>
 
+  <button type="button" id="lightPill" class="lightpill" hidden>Stopped at a light? Tap to log it</button>
+  <div id="tipBar" class="tipbar" hidden></div>
   <div class="d-bar">
     <span id="remain"></span>
     <span id="simTag" class="simtag" hidden>TEST DRIVE</span>
@@ -137,7 +157,37 @@
   <div id="banner" class="banner" hidden></div>
 </main>
 
-<script src="core.js?v=3"></script>
-<script src="app.js?v=3"></script>
+<!-- ============================== RECORD ============================== -->
+<main id="rec" class="screen recscreen" hidden>
+  <p class="rec-top"><span class="dot" aria-hidden="true"></span> Recording a route</p>
+  <div class="rec-speed"><b id="recSpeed">--</b><span>mph</span></div>
+  <dl class="stats rec-stats">
+    <div><dt>Distance</dt><dd id="recDist">0.0 mi</dd></div>
+    <div><dt>Time</dt><dd id="recTime">0:00</dd></div>
+    <div><dt>Lights tapped</dt><dd id="recTaps">0</dd></div>
+  </dl>
+  <p class="note" id="recNote">Drive it the way you normally go. Stops at mapped lights are counted automatically when you save. If you're stopped at a light the map might not know about, tap the button.</p>
+  <button id="recLight" class="btn lightbtn" type="button" hidden>Stopped at a light — tap to log</button>
+  <div class="rec-actions">
+    <button id="recStop" class="btn primary" type="button">Stop &amp; save</button>
+    <button id="recCancel" class="btn ghost" type="button">Cancel</button>
+  </div>
+</main>
+
+<!-- ============================== SAVE SHEET ============================== -->
+<div id="saveSheet" class="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="svTitle">
+    <h2 id="svTitle">Save this route</h2>
+    <label class="field">Route name<input id="svName" type="text" placeholder="e.g. Via Bangerter" autocomplete="off" enterkeyhint="next"></label>
+    <label class="field">Where does it go?<input id="svDest" type="text" placeholder="e.g. Work" autocomplete="off" enterkeyhint="done"></label>
+    <div id="svChips" class="chips"></div>
+    <p id="svStatus" class="status" role="status" aria-live="polite"></p>
+    <button id="svSave" class="btn primary" type="button">Save route</button>
+    <button id="svCancel" class="btn ghost" type="button">Cancel</button>
+  </div>
+</div>
+
+<script src="core.js?v=4"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>

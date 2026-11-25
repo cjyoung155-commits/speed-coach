@@ -174,4 +174,65 @@ h2 { font-size: 20px; line-height: 1.2; margin: 0 0 12px; text-wrap: balance; }
   .msg { text-align: left; margin-top: 0; }
   .ahead-fig { height: 80px; }
 }
-@media (prefers-reduced-motion: reduce) { .target, .t-num { transition: none; } }
+/* ------------------------------------------------------------ my routes */
+.myroutes { margin-bottom: 10px; }
+.myroutes > h2, h2.sub { font-size: 17px; margin: 6px 2px 10px; }
+h2.sub { color: var(--muted); font-weight: 600; margin-top: 22px; }
+.group .pick { font-size: 17px; font-weight: 700; margin: 2px 0 4px; text-wrap: balance; }
+.group .pick.learning, .group .pick.collecting { color: var(--amber); font-weight: 600; font-size: 15px; }
+.rlist { list-style: none; margin: 10px 0 0; padding: 0; }
+.rlist li button {
+  width: 100%; text-align: left; padding: 10px 12px; min-height: 52px; margin-top: 8px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 12px;
+}
+.rlist b { display: block; font-size: 15px; }
+.rlist span { display: block; color: var(--muted); font-size: 13px; line-height: 1.35; }
+.rec-btn { display: flex; align-items: center; justify-content: center; gap: 10px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--red); display: inline-block; flex: none; }
+.btn.danger { color: #ffb3ad; border-color: #4a2226; }
+
+/* ------------------------------------------------------------ recording */
+.recscreen {
+  max-width: 640px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column;
+  padding: calc(var(--safe-t) + 18px) calc(var(--safe-r) + 18px) calc(var(--safe-b) + 18px) calc(var(--safe-l) + 18px);
+}
+.rec-top { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; margin: 0; }
+.rec-top .dot { animation: blink 1.4s infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+.rec-speed { text-align: center; margin: 18px 0 8px; }
+.rec-speed b { display: block; font-size: clamp(96px, 30vw, 180px); line-height: .95; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -0.03em; }
+.rec-speed span { color: var(--muted); font-weight: 600; }
+.rec-stats { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+.lightbtn { background: var(--amber); color: #1d1300; min-height: 72px; font-size: 19px; }
+.rec-actions { margin-top: auto; }
+
+/* ------------------------------------------------------------ save sheet */
+.sheet { position: fixed; inset: 0; background: rgba(0, 0, 0, .6); display: flex; align-items: flex-end; justify-content: center; z-index: 10; }
+.sheet-card {
+  width: 100%; max-width: 560px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 22px 22px 0 0; padding: 20px 18px calc(var(--safe-b) + 18px);
+}
+.field { display: block; font-size: 14px; color: var(--muted); font-weight: 600; margin-bottom: 12px; }
+.field input {
+  display: block; width: 100%; margin-top: 6px; height: 50px; padding: 0 14px; font-size: 17px; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 12px; outline: none;
+}
+.field input:focus { border-color: var(--green); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: -4px 0 6px; }
+.chipbtn { height: 36px; padding: 0 14px; border-radius: 18px; border: 1px solid var(--line); background: var(--bg); font-weight: 600; }
+.filebtn { display: inline-flex; align-items: center; justify-content: center; position: relative; overflow: hidden; cursor: pointer; }
+.filebtn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+/* ------------------------------------------------------------ drive extras */
+.lightpill {
+  align-self: center; margin-top: 8px; min-height: 52px; padding: 0 22px; border-radius: 26px;
+  background: var(--amber); color: #1d1300; border: 0; font-weight: 800; font-size: 17px;
+}
+.lightpill.logging { background: #3a1513; color: #ffb3ad; border: 1px solid #6a2622; font-variant-numeric: tabular-nums; }
+.tipbar {
+  margin-top: 8px;
+  background: #0f2a1b; border: 1px solid #1f5a39; color: #9ff0bf; padding: 10px 14px; border-radius: 12px;
+  font-weight: 700; text-align: center; font-size: 15px;
+}
+
+@media (prefers-reduced-motion: reduce) { .target, .t-num { transition: none; } .rec-top .dot { animation: none; } }

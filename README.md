@@ -28,13 +28,26 @@ The colors mean: **green** = on target, **white** = speed up gently, **amber** =
 
 The speed-limit sign shows where the limit came from: **posted** (mapped from a real sign), **est. from road type** (a guess based on the kind of road), or **unknown** (your setting). Tap **−5 / +5** to correct it. Your correction sticks until the road changes.
 
+## My routes: which way has the least time at lights
+
+1. Tap **Record a new route**, drive the way you normally go, then tap **Stop & save**. Give the route a name (like "Via Bangerter") and say where it goes (like "Work"). Routes with the same destination are compared against each other.
+2. Every time you drive a saved route, Speed Coach logs your stops at lights: where, what time and day, and how long you waited. It does this automatically at lights on the map. If it doesn't know about a light, a **Stopped at a light? Tap to log it** button appears while you're stopped, and it remembers that light for next time.
+3. For each destination, My routes picks the route with the **least expected time stopped at lights** for the current time of day and kind of day (weekday or weekend), like "Use Via East — about 30 sec less at lights around 7:32 AM."
+4. While you drive, before your routes split, it checks again using when you'll actually reach the split. If another route looks 15+ seconds better, a green tip says so. If you take the other route, it switches to that one without rerouting.
+
+It needs about 8 trips per route at similar times before the picks mean much. Until then, it says "still learning," and about 1 day in 4 it suggests the route it knows least about.
+
+Your routes and trips are stored on your phone only. Use **Settings → Back up** now and then to keep a copy.
+
+The **light ahead** cue ("Light in 400 ft — be ready to coast") comes from traffic lights on OpenStreetMap. It doesn't know what color the light is.
+
 ## Where the data comes from
 
 All of these are free and need no account or key:
 
 - Destination search: [Nominatim](https://nominatim.org) (OpenStreetMap)
 - Route: [OSRM](https://project-osrm.org) public server, with the OpenStreetMap routing server as a backup
-- Speed limits: OpenStreetMap `maxspeed` tags via the [Overpass API](https://overpass-api.de)
+- Speed limits and traffic lights: OpenStreetMap `maxspeed` and `traffic_signals` tags via the [Overpass API](https://overpass-api.de)
 - Elevation: Copernicus DEM GLO-90 via [Open-Meteo](https://open-meteo.com)
 
 Map data © OpenStreetMap contributors.

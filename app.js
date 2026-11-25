@@ -8,7 +8,7 @@
   // ------------------------------------------------------------ storage & settings
   const store = {
     get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
-    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private mode */ } }
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
   };
   const DEFAULTS = { eco: 0, band: 5, fallback: 45, voice: true, simX: 4, accelWarn: 3 };
   const settings = Object.assign({}, DEFAULTS, store.get('sc.settings', {}));
@@ -25,6 +25,8 @@
 
   // ------------------------------------------------------------ app state
   let dest = null, route = null, profile = null, limits = null, loadNote = '';
+  let signals = [];          // traffic lights on the current route (m along it)
+  let active = null;         // the saved route being shown or driven, or null for a searched route
   let lastPos = null;
 
   // ------------------------------------------------------------ helpers
@@ -148,12 +150,13 @@
     return C.buildProfile(r.total, step, [].concat.apply([], out));
   }
 
-  async function fetchWays(r) {
-    if (!r.segNodes) return [];
-    const ids = Array.from(new Set(r.segNodes.filter(n => n > 0)));
-    const byId = new Map();
+  /** Road segments (for speed limits) and traffic-light nodes along the route. */
+  async function fetchMapData(r) {
+    const ids = C.routeNodeIds(r);
+    const byId = new Map(), signalIds = new Set();
     for (let i = 0; i < ids.length; i += 2000) {
-      const query = '[out:json][timeout:60];node(id:' + ids.slice(i, i + 2000).join(',') + ');way(bn)[highway];out body;';
+      const query = '[out:json][timeout:60];node(id:' + ids.slice(i, i + 2000).join(',') + ')->.n;' +
+        'way(bn.n)[highway];out body;node.n[highway=traffic_signals];out ids;';
       let j = null, lastErr;
       for (const url of API.overpass) {
         try {
@@ -165,22 +168,32 @@
         } catch (e) { lastErr = e; }
       }
       if (!j) throw lastErr || new Error('overpass');
-      for (const el of (j.elements || [])) if (el.type === 'way') byId.set(el.id, el);
+      for (const el of (j.elements || [])) {
+        if (el.type === 'way') byId.set(el.id, el);
+        else if (el.type === 'node') signalIds.add(el.id);
+      }
     }
-    return Array.from(byId.values());
+    return { ways: Array.from(byId.values()), signalIds };
   }
 
-  /** Route + hills + limits from `from` to `to`. Hills and limits fail soft. */
+  /** Hills, speed limits and lights for a route. Each fails soft. */
+  async function loadDetails(r) {
+    const [pe, me] = await Promise.allSettled([fetchElevation(r), fetchMapData(r)]);
+    const notes = [];
+    const prof = pe.status === 'fulfilled' ? pe.value : (notes.push('Hill data didn’t load, so hills are ignored.'), C.flatProfile(r.total));
+    const md = me.status === 'fulfilled' ? me.value : null;
+    const lim = C.buildLimits(r, md && md.ways);
+    if (!md) notes.push('Speed limits didn’t load; it will use your “unknown limit” speed.');
+    return { prof, lim, signals: md ? C.buildSignals(r, md.signalIds) : [], notes };
+  }
+
+  /** Route + hills + limits + lights from `from` to `to`. */
   async function loadAll(from, to, onStep) {
     onStep && onStep('Getting the route…');
     const r = C.buildRoute(await fetchRoute(from, to));
-    onStep && onStep('Reading hills and speed limits…');
-    const [pe, le] = await Promise.allSettled([fetchElevation(r), fetchWays(r)]);
-    const notes = [];
-    const prof = pe.status === 'fulfilled' ? pe.value : (notes.push('Hill data didn’t load, so hills are ignored.'), C.flatProfile(r.total));
-    const lim = C.buildLimits(r, le.status === 'fulfilled' ? le.value : null);
-    if (le.status !== 'fulfilled') notes.push('Speed limits didn’t load; it will use your “unknown limit” speed.');
-    return { r, prof, lim, notes };
+    onStep && onStep('Reading hills, speed limits and lights…');
+    const det = await loadDetails(r);
+    return Object.assign({ r }, det);
   }
 
   async function planTo(place) {
@@ -192,7 +205,7 @@
     try { from = await getPosition(30000); } catch (e) { setStatus(geoErrorText(e), true); return; }
     try {
       const res = await loadAll(from, place, setStatus);
-      route = res.r; profile = res.prof; limits = res.lim;
+      route = res.r; profile = res.prof; limits = res.lim; signals = res.signals; active = null;
       loadNote = res.notes.join(' ');
       remember(place);
       setStatus('');
@@ -203,7 +216,11 @@
   }
 
   function showRouteCard() {
-    $('routeName').textContent = 'To ' + dest.name;
+    $('routeName').textContent = active ? active.name + ' → ' + active.dest : 'To ' + dest.name;
+    $('saveRouteBtn').hidden = !!active;
+    $('deleteRouteBtn').hidden = !active;
+    $('deleteRouteBtn').textContent = 'Delete this route';
+    delete $('deleteRouteBtn').dataset.armed;
     $('stDist').textContent = fmtMi(route.total);
     $('stTime').textContent = fmtMin(route.duration);
     $('stClimb').textContent = profile.flat ? '–' : Math.round(profile.climb * C.FT_PER_M).toLocaleString() + ' ft';
@@ -212,7 +229,8 @@
     const posted = Math.round(limits.postedShare * 100), known = Math.round(limits.knownShare * 100);
     note.append('Speed limits: ' + posted + '% from posted signs' +
       (known > posted ? ', ' + (known - posted) + '% estimated from road type' : '') +
-      (known < 100 ? ', rest uses your “unknown limit” speed' : '') + '. ');
+      (known < 100 ? ', rest uses your “unknown limit” speed' : '') + '. ' +
+      (signals.length ? signals.length + ' traffic light' + (signals.length > 1 ? 's' : '') + ' on the map. ' : ''));
     if (loadNote) { const w = document.createElement('span'); w.className = 'warn'; w.textContent = loadNote; note.append(w); }
     $('routeCard').hidden = false;
     drawRouteProfile();
@@ -278,6 +296,14 @@
       ctx.strokeStyle = xs[i] > profile.total ? '#39424d' : GRADE_COL(g);
       ctx.beginPath(); ctx.moveTo(X(i), Y(es[i])); ctx.lineTo(X(i + 1), Y(es[i + 1])); ctx.stroke();
     }
+    // traffic lights
+    for (const L of (opts.lights || [])) {
+      if (L < d0 || L > d1) continue;
+      const lx = (L - d0) / span * w, ly = Y(C.elevAt(profile, Math.min(L, profile.total)));
+      ctx.strokeStyle = '#e9edf2'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx, ly - 16); ctx.stroke();
+      ctx.fillStyle = '#ff5a4f'; ctx.beginPath(); ctx.arc(lx, ly - 19, 3.5, 0, Math.PI * 2); ctx.fill();
+    }
     // marker
     if (opts.marker != null) {
       const i = (opts.marker - d0) / span * N, mx = X(i);
@@ -298,7 +324,7 @@
     if (!route || $('routeCard').hidden) return;
     const ft = v => Math.round(v * C.FT_PER_M).toLocaleString() + ' ft';
     drawProfile($('routeProfile'), 0, route.total, {
-      minRange: 30,
+      minRange: 30, lights: currentLights(),
       labels: [{ d: 0, text: 'Start' }, { d: route.total / 2, text: '↑ ' + ft(profile.climb) + '  ↓ ' + ft(profile.descent) }, { d: route.total, text: fmtMi(route.total) }]
     });
   }
@@ -309,7 +335,7 @@
     const dNow = drive.dispD != null ? drive.dispD : drive.d;
     const d0 = Math.max(0, dNow - 120);
     drawProfile($('aheadProfile'), d0, d0 + AHEAD_M, {
-      minRange: 15, marker: dNow, scale: drive.scale,
+      minRange: 15, marker: dNow, scale: drive.scale, lights: currentLights(),
       labels: [{ d: dNow, text: 'You' }, { d: dNow + 804.7, text: '½ mi' }, { d: dNow + 1609.3, text: '1 mi' }]
     });
   }
@@ -323,12 +349,14 @@
     // smooth motion between GPS fixes
     fixAt: 0, timeScale: 1, dispD: null, lastDraw: 0, scale: {}, ticker: null,
     // acceleration warning and the 4-second step speed
-    samples: [], accel: null, hard: false, hardCount: 0, step: null
+    samples: [], accel: null, hard: false, hardCount: 0, step: null,
+    // logging stops at lights on a saved route
+    trip: null, tracker: null, alts: [], tip: null, lastTipAt: 0, tripDone: false
   };
 
   async function keepAwake() {
     try {
-      if ('wakeLock' in navigator && document.visibilityState === 'visible' && drive.active) {
+      if ('wakeLock' in navigator && document.visibilityState === 'visible' && (drive.active || rec.active)) {
         drive.wakeLock = await navigator.wakeLock.request('screen');
       }
     } catch (e) { /* not available; the screen may dim */ }
@@ -349,8 +377,13 @@
       active: true, idx: null, d: 0, speed: 0, lastFix: null, hasFix: false, prevMode: null, last: null,
       override: null, overrideKey: null, offCount: 0, rerouting: false, spokenAt: {}, lastSpeak: 0,
       fixAt: 0, timeScale: sim ? (settings.simX || 1) : 1, dispD: null, lastDraw: 0, scale: {},
-      samples: [], accel: null, hard: false, hardCount: 0, step: null
+      samples: [], accel: null, hard: false, hardCount: 0, step: null,
+      trip: null, tracker: null, alts: [], tip: null, lastTipAt: 0, tripDone: false
     });
+    // On a saved route (and not a test drive), log stops at lights for this trip.
+    if (active && !sim) beginTrip(0);
+    drive.alts = active ? altsFor(active) : [];
+    $('tipBar').hidden = true;
     $('plan').hidden = true; $('drive').hidden = false;
     $('simTag').hidden = !sim;
     $('banner').hidden = true;
@@ -373,7 +406,7 @@
   function predictedD() {
     if (!drive.hasFix || drive.offCount) return drive.d;
     const el = Math.min(2.5, (performance.now() - drive.fixAt) / 1000 * drive.timeScale);
-    return Math.min(route.total, drive.d + drive.speed / MPH * el);
+    return Math.min(route.total, drive.d + Math.min(drive.speed, 90) / MPH * el);
   }
 
   /** Graph animation, ~25 frames a second. */
@@ -391,6 +424,7 @@
   }
 
   function endDrive() {
+    finishTrip(false);
     drive.active = false;
     if (drive.ticker) { clearInterval(drive.ticker); drive.ticker = null; }
     if (drive.watchId != null) { navigator.geolocation.clearWatch(drive.watchId); drive.watchId = null; }
@@ -438,7 +472,19 @@
     if (sn.dist > 70 && accurate) drive.offCount++;
     else { drive.offCount = 0; drive.idx = sn.idx; drive.d = sn.d; }
 
+    if (drive.trip && !drive.offCount) {
+      // Progress only counts in believable steps, so a stale first fix or a GPS jump can't fake a trip.
+      const tr = drive.trip, step = tr.lastD == null ? null : drive.d - tr.lastD;
+      tr.lastD = drive.d;
+      if (step != null && Math.abs(step) < 400) {
+        drive.tracker.push(f.ts, drive.d, mph != null ? mph : drive.speed);
+        tr.reached = Math.max(tr.reached, drive.d);
+        if (!tr.tl.length || drive.d - tr.tl[tr.tl.length - 1][0] >= 200) tr.tl.push([Math.round(drive.d), f.ts]);
+      }
+    }
+
     if (drive.offCount >= 3) {
+      if (switchToAlt(p)) { showBanner(''); update(); return; }
       showBanner(drive.rerouting ? 'Off route — finding a new route…' : 'Off route');
       if (!drive.sim) reroute(p);
     } else if (f.acc > 60) showBanner('Weak GPS signal');
@@ -457,7 +503,7 @@
     if (drive.override != null && key !== drive.overrideKey) drive.override = null;
 
     const s = C.suggest({
-      route, profile, limits, d, speed: drive.speed, prevMode: drive.prevMode,
+      route, profile, limits, signals: currentLights(), d, speed: drive.speed, prevMode: drive.prevMode,
       settings: { band: settings.band, eco: settings.eco, fallback: settings.fallback },
       override: drive.override
     });
@@ -473,6 +519,22 @@
     }
     drive.prevMode = s.mode;
     if (s.mode === 'arrived' && drive.sim) { clearInterval(drive.sim.timer); }
+    if (s.mode === 'arrived' && drive.trip && !drive.tripDone && drive.trip.reached >= route.total - 80) {
+      const sum = finishTrip(true);
+      if (sum) $('msg').textContent = sum;
+    }
+    renderLightPill();
+    // Every 10 s before a split: would another saved route be better from here?
+    if (drive.alts.length && Date.now() - drive.lastTipAt > 10000) {
+      drive.lastTipAt = Date.now();
+      const meta = active && lightsMeta(active);
+      drive.tip = meta ? C.liveCompare(meta, drive.alts, tripsByRoute(), d, Date.now()) : null;
+      const tb = $('tipBar');
+      if (drive.tip) {
+        tb.textContent = drive.tip.name + ': about ' + C.fmtSec(drive.tip.gain) + ' less at lights right now · split in ' + C.fmtDist(drive.tip.splitIn);
+        tb.hidden = false;
+      } else tb.hidden = true;
+    }
   }
 
   async function reroute(p) {
@@ -481,7 +543,9 @@
     showBanner('Off route — finding a new route…');
     try {
       const res = await loadAll({ lat: p[0], lon: p[1] }, dest);
-      route = res.r; profile = res.prof; limits = res.lim;
+      finishTrip(false);                 // left the saved route: keep what was logged so far
+      active = null; drive.alts = []; $('tipBar').hidden = true;
+      route = res.r; profile = res.prof; limits = res.lim; signals = res.signals;
       Object.assign(drive, { idx: null, d: 0, offCount: 0, override: null, dispD: null, scale: {} });
       showBanner('');
     } catch (e) { showBanner('Off route — couldn’t get a new route yet'); }
@@ -553,6 +617,375 @@
     tick();
   }
 
+  // ------------------------------------------------------------ my routes (saved routes + trips)
+  const lib = {
+    routes: () => store.get('sc.routes', []),
+    saveRoutes: list => store.set('sc.routes', list),
+    trips: () => store.get('sc.trips', []),
+    saveTrips: list => store.set('sc.trips', list.slice(-1500))
+  };
+  const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const sameDest = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+  const lightsOf = meta => Array.from(new Set((meta.data.sig || []).concat(meta.extra || []))).sort((a, b) => a - b);
+  const lightsMeta = meta => ({ id: meta.id, name: meta.name, total: meta.total, lights: lightsOf(meta) });
+  function currentLights() { return active ? lightsOf(active) : signals; }
+  function tripsByRoute() {
+    const by = {};
+    for (const t of lib.trips()) (by[t.routeId] = by[t.routeId] || []).push(t);
+    return by;
+  }
+
+  function renderMyRoutes() {
+    const box = $('groups'); box.textContent = '';
+    const routes = lib.routes();
+    $('myRoutesEmpty').hidden = routes.length > 0;
+    const groups = [];
+    for (const r of routes) {
+      let g = groups.find(x => sameDest(x.dest, r.dest));
+      if (!g) groups.push(g = { dest: r.dest, routes: [] });
+      g.routes.push(r);
+    }
+    const by = tripsByRoute(), now = Date.now();
+    const seedBase = new Date(now).toDateString() + (new Date(now).getHours() < 12 ? 'am' : 'pm');
+    for (const g of groups) {
+      const rec = C.recommend(g.routes.map(lightsMeta), by, now, g.dest.toLowerCase() + seedBase);
+      const card = document.createElement('div'); card.className = 'card group';
+      const eb = document.createElement('p'); eb.className = 'eyebrow'; eb.textContent = 'To ' + g.dest;
+      card.append(eb);
+      if (rec.text) { const p = document.createElement('p'); p.className = 'pick ' + rec.kind; p.textContent = rec.text; card.append(p); }
+      const pick = g.routes.find(r => r.id === rec.pick) || g.routes[0];
+      const go = document.createElement('button'); go.type = 'button'; go.className = 'btn primary';
+      go.textContent = 'Start ' + pick.name;
+      go.addEventListener('click', () => { openSaved(pick); startDrive(false); });
+      card.append(go);
+      const ul = document.createElement('ul'); ul.className = 'rlist';
+      for (const r of g.routes) {
+        const row = rec.rows.find(x => x.id === r.id) || {};
+        const li = document.createElement('li'), b = document.createElement('button'); b.type = 'button';
+        const t = document.createElement('b'); t.textContent = r.name + (r.id === rec.pick && g.routes.length > 1 ? '  ★' : '');
+        const sp = document.createElement('span');
+        sp.textContent = (row.ready ? 'about ' + C.fmtSec(row.wait) + ' at lights now · ' + row.stops.toFixed(1) + ' stops · ' : 'learning · ') +
+          (row.trips || 0) + ' trip' + (row.trips === 1 ? '' : 's') + ' · ' + fmtMi(r.total);
+        b.append(t, sp);
+        b.addEventListener('click', () => { openSaved(r); $('routeCard').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+        li.append(b); ul.append(li);
+      }
+      card.append(ul);
+      box.append(card);
+    }
+  }
+
+  function loadSavedData(meta) {
+    const u = C.unpackRoute(meta.data);
+    return { route: u.route, profile: u.profile, limits: u.limits, signals: u.signals };
+  }
+
+  function openSaved(meta) {
+    const u = loadSavedData(meta);
+    route = u.route; profile = u.profile; limits = u.limits; signals = u.signals; active = meta;
+    dest = { name: meta.dest, lat: meta.end[0], lon: meta.end[1] };
+    loadNote = '';
+    setStatus('');
+    showRouteCard();
+    if (Date.now() - (meta.savedAt || 0) > 30 * 864e5) refreshSaved(meta);
+  }
+
+  /** Re-read hills, speed limits and lights for a saved route that is over a month old. */
+  async function refreshSaved(meta) {
+    try {
+      const r = loadSavedData(meta).route;
+      if (!r.segPairs) return;
+      const det = await loadDetails(r);
+      if (det.notes.length) return;
+      const fresh = C.packRoute(r, det.prof, det.lim, det.signals);
+      const list = lib.routes(), i = list.findIndex(x => x.id === meta.id);
+      if (i < 0) return;
+      list[i].data = Object.assign(list[i].data, { prof: fresh.prof, lim: fresh.lim, sig: fresh.sig });
+      list[i].savedAt = Date.now();
+      lib.saveRoutes(list);
+    } catch (e) { /* try again next time */ }
+  }
+
+  /** The other saved routes to the same place, with where each splits from this one. */
+  function altsFor(meta) {
+    const cur = loadSavedData(meta).route;
+    return lib.routes().filter(r => r.id !== meta.id && sameDest(r.dest, meta.dest)).map(r => {
+      const u = loadSavedData(r);
+      return { route: Object.assign(lightsMeta(r), { geo: u.route }), split: C.splitPoint(cur, u.route), meta: r };
+    }).filter(a => a.split);
+  }
+
+  function beginTrip(fromD) {
+    drive.trip = { id: newId(), routeId: active.id, t0: Date.now(), fromD, reached: fromD, tl: [], stops: [] };
+    drive.tracker = C.stopTracker(lightsOf(active));
+    drive.tripDone = false;
+  }
+
+  /** Save the trip being logged. Returns a one-line summary, or '' if nothing was saved. */
+  function finishTrip(arrived) {
+    const tr = drive.trip;
+    if (!tr || drive.tripDone) return '';
+    drive.tripDone = true;
+    tr.stops = drive.tracker.finish(Date.now());
+    delete tr.lastD;
+    if (arrived) tr.reached = Math.max(tr.reached, active ? active.total : tr.reached);
+    drive.trip = null;
+    if (tr.reached - tr.fromD < 300) return '';
+    learnLights(tr);
+    const all = lib.trips(); all.push(tr);
+    if (!lib.saveTrips(all)) { showBanner('Phone storage is full — trip not saved'); return ''; }
+    renderMyRoutes();
+    const wait = tr.stops.reduce((a, st) => a + st.dur, 0);
+    return 'Trip logged · ' + tr.stops.length + ' light stop' + (tr.stops.length === 1 ? '' : 's') + ' · ' + C.fmtSec(wait) + ' waiting';
+  }
+
+  /** A light you tapped that isn't on the map is remembered for next time. */
+  function learnLights(tr) {
+    const list = lib.routes(), meta = list.find(r => r.id === tr.routeId);
+    if (!meta) return;
+    let changed = false;
+    for (const st of tr.stops) {
+      if (st.mapped) continue;
+      const known = lightsOf(meta);
+      if (!known.some(L => Math.abs(L - st.light) < 150)) { (meta.extra = meta.extra || []).push(st.light + 30); changed = true; }
+    }
+    if (changed) { lib.saveRoutes(list); if (active && active.id === meta.id) active = meta; }
+  }
+
+  /** Off the current saved route but on another one to the same place: carry on with that one. */
+  function switchToAlt(p) {
+    for (const a of drive.alts) {
+      const sn = C.snap(a.route.geo, p, null);
+      if (sn.dist > 40) continue;
+      finishTrip(false);
+      const meta = a.meta, u = loadSavedData(meta);
+      route = u.route; profile = u.profile; limits = u.limits; signals = u.signals; active = meta;
+      Object.assign(drive, { idx: sn.idx, d: sn.d, offCount: 0, dispD: null, scale: {}, prevMode: null, tip: null });
+      if (drive.watchId != null) beginTrip(sn.d);
+      drive.alts = altsFor(meta);
+      $('tipBar').hidden = true;
+      return true;
+    }
+    return false;
+  }
+
+  /** While stopped on a saved route: show that a light is being logged, or offer the button. */
+  function renderLightPill() {
+    const pill = $('lightPill');
+    const cur = drive.tracker && drive.tracker.cur;
+    if (!drive.trip || !cur || drive.speed >= 3) { pill.hidden = true; return; }
+    pill.hidden = false;
+    if (cur.light != null || cur.manual) {
+      const secs = Math.max(0, Math.round((Date.now() - cur.t0) / 1000));
+      pill.textContent = 'Logging light · ' + Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+      pill.className = 'lightpill logging';
+    } else {
+      pill.textContent = 'Stopped at a light? Tap to log it';
+      pill.className = 'lightpill';
+    }
+  }
+
+  // ------------------------------------------------------------ recording a route
+  const rec = { active: false, watchId: null, pts: [], taps: [], t0: 0, timer: null, dist: 0, last: null, speed: 0 };
+
+  function startRecording() {
+    Object.assign(rec, { active: true, pts: [], taps: [], t0: Date.now(), dist: 0, last: null, speed: 0 });
+    $('plan').hidden = true; $('rec').hidden = false;
+    $('recSpeed').textContent = '--'; $('recDist').textContent = '0.0 mi'; $('recTime').textContent = '0:00'; $('recTaps').textContent = '0';
+    $('recLight').hidden = true;
+    keepAwake();
+    rec.note = $('recNote').textContent;
+    rec.watchId = navigator.geolocation.watchPosition(onRecFix, e => {
+      $('recNote').textContent = e && e.code === 1 ? geoErrorText(e) : 'Weak GPS signal — still recording.';
+    },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+    rec.timer = setInterval(() => {
+      const s = Math.round((Date.now() - rec.t0) / 1000);
+      $('recTime').textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }, 1000);
+  }
+
+  function onRecFix(p) {
+    const f = { lat: p.coords.latitude, lon: p.coords.longitude, t: p.timestamp || Date.now(), acc: p.coords.accuracy };
+    let v = p.coords.speed != null && p.coords.speed >= 0 ? p.coords.speed * MPH : null;
+    if (v == null && rec.last) {
+      const dt = (f.t - rec.last.t) / 1000;
+      if (dt > 0.3) v = C.haversine([rec.last.lat, rec.last.lon], [f.lat, f.lon]) / dt * MPH;
+    }
+    rec.speed = v == null ? rec.speed : rec.speed * 0.35 + v * 0.65;
+    rec.last = f;
+    if (rec.note) $('recNote').textContent = rec.note;
+    $('recSpeed').textContent = String(Math.round(rec.speed));
+    $('recLight').hidden = rec.speed >= 3;
+    if (f.acc > 50) return;
+    const prev = rec.pts[rec.pts.length - 1];
+    const step = prev ? C.haversine([prev.lat, prev.lon], [f.lat, f.lon]) : 0;
+    const vNow = v == null ? rec.speed : v;
+    if (!prev || step >= 8 || f.t - prev.t >= 3000 || (vNow < 2) !== (prev.v < 2)) {
+      rec.pts.push({ lat: f.lat, lon: f.lon, t: f.t, v: vNow });
+      rec.dist += step;
+      $('recDist').textContent = fmtMi(rec.dist);
+    }
+  }
+
+  function stopRecording() {
+    rec.active = false;
+    if (rec.watchId != null) { navigator.geolocation.clearWatch(rec.watchId); rec.watchId = null; }
+    clearInterval(rec.timer);
+    if (drive.wakeLock) { drive.wakeLock.release().catch(() => {}); drive.wakeLock = null; }
+  }
+
+  /** Rebuild the recorded drive on the road map: via points every ~700 m, pointed the way you drove. */
+  async function buildFromTrace(trace) {
+    const cum = [0];
+    for (let i = 1; i < trace.length; i++) cum.push(cum[i - 1] + C.haversine([trace[i - 1].lat, trace[i - 1].lon], [trace[i].lat, trace[i].lon]));
+    const total = cum[cum.length - 1];
+    const every = Math.max(700, total / 23);
+    const picks = [0];
+    for (let i = 1; i < trace.length - 1; i++) if (cum[i] - cum[picks[picks.length - 1]] >= every && total - cum[i] > every / 2) picks.push(i);
+    picks.push(trace.length - 1);
+    const bearingAt = i => {
+      let a = i, b = i;
+      while (a > 0 && cum[i] - cum[a] < 30) a--;
+      while (b < trace.length - 1 && cum[b] - cum[i] < 30) b++;
+      if (a === b) return null;
+      const y = Math.sin((trace[b].lon - trace[a].lon) * Math.PI / 180) * Math.cos(trace[b].lat * Math.PI / 180);
+      const x = Math.cos(trace[a].lat * Math.PI / 180) * Math.sin(trace[b].lat * Math.PI / 180) -
+        Math.sin(trace[a].lat * Math.PI / 180) * Math.cos(trace[b].lat * Math.PI / 180) * Math.cos((trace[b].lon - trace[a].lon) * Math.PI / 180);
+      return Math.round((Math.atan2(y, x) * 180 / Math.PI + 360) % 360);
+    };
+    const coords = picks.map(i => trace[i].lon.toFixed(6) + ',' + trace[i].lat.toFixed(6)).join(';');
+    const bearings = picks.map((i, k) => { const b = k === 0 || k === picks.length - 1 ? null : bearingAt(i); return b == null ? '' : b + ',60'; }).join(';');
+    const radiuses = picks.map(() => '50').join(';');
+    const base = '?overview=full&geometries=geojson&steps=true&annotations=nodes&continue_straight=true&radiuses=' + radiuses;
+    let osrm = null;
+    for (const q of [base + '&bearings=' + bearings, base]) {
+      for (const host of API.osrm) {
+        try {
+          const j = await fetchJSON(host + coords + q, null, 25000);
+          if (j.code === 'Ok' && j.routes && j.routes.length) { osrm = j.routes[0]; break; }
+        } catch (e) { /* next */ }
+      }
+      if (osrm) break;
+    }
+    if (!osrm) throw new Error('route');
+    const r = C.buildRoute(osrm);
+    const det = await loadDetails(r);
+    return Object.assign({ r, traceLen: total }, det);
+  }
+
+  /** Turn the recording itself into the route's first logged trip. */
+  function tripFromTrace(meta, r, trace, taps) {
+    const T = C.stopTracker(lightsOf(meta));
+    const tl = [], tapList = taps.slice();
+    let idx = null, reached = 0;
+    for (const p of trace) {
+      const sn = idx == null ? C.snap(r, [p.lat, p.lon], null) : C.snap(r, [p.lat, p.lon], idx, 30, 400);
+      if (sn.dist > 80) continue;
+      idx = sn.idx; reached = Math.max(reached, sn.d);
+      while (tapList.length && tapList[0] <= p.t) T.manual(tapList.shift(), sn.d);
+      T.push(p.t, sn.d, p.v);
+      if (!tl.length || sn.d - tl[tl.length - 1][0] >= 200) tl.push([Math.round(sn.d), p.t]);
+    }
+    const end = trace[trace.length - 1].t;
+    return { id: newId(), routeId: meta.id, t0: trace[0].t, fromD: 0, reached, tl, stops: T.finish(end + 1000) };
+  }
+
+  // ------------------------------------------------------------ save sheet
+  let saving = null;      // {kind: 'trace'|'current'}
+  function openSaveSheet(kind) {
+    saving = { kind };
+    $('svName').value = ''; $('svDest').value = kind === 'current' && dest ? dest.name : '';
+    $('svStatus').textContent = ''; $('svStatus').classList.remove('err');
+    $('svSave').disabled = false;
+    $('svCancel').textContent = kind === 'trace' ? 'Discard recording' : 'Cancel';
+    const chips = $('svChips'); chips.textContent = '';
+    const dests = [];
+    for (const r of lib.routes()) if (!dests.some(d => sameDest(d, r.dest))) dests.push(r.dest);
+    for (const d of dests) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'chipbtn'; b.textContent = d;
+      b.addEventListener('click', () => { $('svDest').value = d; });
+      chips.append(b);
+    }
+    $('saveSheet').hidden = false;
+    setTimeout(() => $('svName').focus(), 50);
+  }
+  function closeSaveSheet() { $('saveSheet').hidden = true; saving = null; }
+
+  async function doSave() {
+    const name = $('svName').value.trim(), where = $('svDest').value.trim();
+    const st = $('svStatus');
+    if (!name || !where) { st.textContent = 'Give it a name and a destination.'; st.classList.add('err'); return; }
+    st.classList.remove('err'); $('svSave').disabled = true;
+    try {
+      let r, prof, lim, sig, first = null, warn = '';
+      const meta = { id: newId(), name, dest: where, savedAt: Date.now(), extra: [] };
+      if (saving.kind === 'trace') {
+        st.textContent = 'Matching your drive to the road map…';
+        const b = await buildFromTrace(rec.pts);
+        r = b.r; prof = b.prof; lim = b.lim; sig = b.signals;
+        if (r.total > b.traceLen * 1.25) warn = ' The mapped route came out longer than your drive — check that it looks right.';
+      } else { r = route; prof = profile; lim = limits; sig = signals; }
+      meta.data = C.packRoute(r, prof, lim, sig);
+      meta.total = Math.round(r.total);
+      meta.start = r.pts[0]; meta.end = r.pts[r.pts.length - 1];
+      const list = lib.routes(); list.push(meta);
+      if (!lib.saveRoutes(list)) throw new Error('storage');
+      if (saving.kind === 'trace') {
+        first = tripFromTrace(meta, r, rec.pts, rec.taps);
+        if (first.reached > 300) { const all = lib.trips(); all.push(first); lib.saveTrips(all); learnLights(first); }
+      }
+      closeSaveSheet();
+      $('rec').hidden = true; $('plan').hidden = false;
+      renderMyRoutes();
+      openSaved(lib.routes().find(x => x.id === meta.id));
+      setStatus('Saved “' + name + '”.' + (first ? ' Your drive counts as its first trip (' + first.stops.length + ' light stop' + (first.stops.length === 1 ? '' : 's') + ').' : '') + warn);
+    } catch (e) {
+      $('svSave').disabled = false;
+      st.classList.add('err');
+      st.textContent = e && e.message === 'storage' ? 'Phone storage is full.' : 'Couldn’t match the drive to the road map — check your signal and try Save again.';
+    }
+  }
+
+  function deleteActive() {
+    const b = $('deleteRouteBtn');
+    if (!active) return;
+    const n = lib.trips().filter(t => t.routeId === active.id).length;
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Tap again to delete it and its ' + n + ' trip' + (n === 1 ? '' : 's'); return; }
+    lib.saveRoutes(lib.routes().filter(r => r.id !== active.id));
+    lib.saveTrips(lib.trips().filter(t => t.routeId !== active.id));
+    active = null; route = null;
+    $('routeCard').hidden = true;
+    renderMyRoutes();
+    setStatus('Route deleted.');
+  }
+
+  // ------------------------------------------------------------ backup
+  async function backup() {
+    const data = JSON.stringify({ app: 'speed-coach', v: 1, at: Date.now(), routes: lib.routes(), trips: lib.trips(), settings });
+    const name = 'speed-coach-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+    try {
+      const file = new File([data], name, { type: 'application/json' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Speed Coach backup' }); return; }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+    a.download = name; document.body.append(a); a.click(); a.remove();
+  }
+  async function restore(file) {
+    const out = $('backupNote');
+    try {
+      const j = JSON.parse(await file.text());
+      if (j.app !== 'speed-coach') throw new Error('not ours');
+      const routes = lib.routes(), trips = lib.trips();
+      for (const r of j.routes || []) if (!routes.some(x => x.id === r.id)) routes.push(r);
+      for (const t of j.trips || []) if (!trips.some(x => x.id === t.id)) trips.push(t);
+      lib.saveRoutes(routes); lib.saveTrips(trips);
+      renderMyRoutes();
+      out.textContent = 'Restored: ' + routes.length + ' routes, ' + trips.length + ' trips.';
+    } catch (e) { out.textContent = 'That file isn’t a Speed Coach backup.'; }
+  }
+
   // ------------------------------------------------------------ settings UI
   function initSettings() {
     document.querySelectorAll('.settings .row[data-key]').forEach(row => {
@@ -593,6 +1026,34 @@
     $('voiceSetting').textContent = settings.voice ? 'On' : 'Off';
     $('voiceSetting').setAttribute('aria-pressed', String(settings.voice));
   });
+  $('recordBtn').addEventListener('click', startRecording);
+  $('recLight').addEventListener('click', () => {
+    rec.taps.push(Date.now());
+    $('recTaps').textContent = String(rec.taps.length);
+    $('recLight').textContent = 'Logged ✓';
+    setTimeout(() => { $('recLight').textContent = 'Stopped at a light — tap to log'; }, 1500);
+  });
+  $('recStop').addEventListener('click', () => {
+    stopRecording();
+    if (rec.pts.length < 10 || rec.dist < 300) {
+      $('rec').hidden = true; $('plan').hidden = false; setStatus('That recording was too short to save.', true); return;
+    }
+    openSaveSheet('trace');
+  });
+  $('recCancel').addEventListener('click', () => { stopRecording(); $('rec').hidden = true; $('plan').hidden = false; });
+  $('svSave').addEventListener('click', doSave);
+  $('svCancel').addEventListener('click', () => {
+    const wasTrace = saving && saving.kind === 'trace';
+    closeSaveSheet();
+    if (wasTrace) { $('rec').hidden = true; $('plan').hidden = false; }
+  });
+  $('saveRouteBtn').addEventListener('click', () => openSaveSheet('current'));
+  $('deleteRouteBtn').addEventListener('click', deleteActive);
+  $('lightPill').addEventListener('click', () => {
+    if (drive.tracker && drive.trip) { drive.tracker.manual(Date.now(), drive.d); renderLightPill(); }
+  });
+  $('backupBtn').addEventListener('click', backup);
+  $('restoreInput').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; if (f) restore(f); e.target.value = ''; });
   $('limDown').addEventListener('click', () => adjustLimit(-5));
   $('limUp').addEventListener('click', () => adjustLimit(5));
 
@@ -608,7 +1069,8 @@
 
   initSettings();
   renderRecent();
+  renderMyRoutes();
 
   // Hooks for automated tests only.
-  window.__speedCoach = { drive, get route() { return route; }, get limits() { return limits; } };
+  window.__speedCoach = { drive, rec, lib, get route() { return route; }, get limits() { return limits; }, get active() { return active; }, get signals() { return signals; } };
 })();
