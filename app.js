@@ -462,7 +462,8 @@
       override: drive.override
     });
     drive.last = s;
-    drive.step = C.stepSpeed(s, drive.speed, settings.accelWarn);
+    drive.guide = C.guide(s, drive.speed, settings.accelWarn);
+    drive.step = drive.guide.step;
     render(s, d);
     if (s.cue && s.mode !== drive.prevMode) {
       const now = Date.now();
@@ -497,25 +498,18 @@
     $('nowBox').classList.remove('hard'); $('nowLabel').textContent = 'mph now';
   }
 
-  const HINTS = {
-    on: 'On target', over: 'Ease off', under: 'Speed up gently', hold: 'Steady throttle — don’t chase it'
-  };
-
   function render(s, d) {
     const speed = drive.speed;
-    const state = C.speedState(speed, s);
-    $('targetBox').className = 'target state-' + state;
+    const G = drive.guide;              // state, both text lines and the step, decided together
+    $('targetBox').className = 'target state-' + G.state;
     $('targetVal').textContent = s.mode === 'arrived' ? '✓' : String(Math.round(s.target));
-    let hint = HINTS[state];
-    if (state === 'over' && s.holdBelow) hint = 'Lift off the gas';
-    if (s.mode === 'arrived') hint = 'Arrived';
-    $('hint').textContent = hint;
+    $('hint').textContent = G.hint;
     $('speedVal').textContent = String(Math.round(speed));
     $('limitVal').textContent = String(Math.round(s.base));
     const srcText = { posted: 'posted', est: 'est. from road type', default: 'unknown · your setting', manual: 'set by you' }[s.src] || '';
     $('limitSrc').textContent = srcText;
     $('sign').className = 'sign' + (s.src === 'est' ? ' est' : s.src === 'default' ? ' unknown' : s.src === 'manual' ? ' manual' : '');
-    $('msg').textContent = s.msg || '\u00a0';
+    $('msg').textContent = G.msg || '\u00a0';
     $('ahead').textContent = s.ahead || '\u00a0';
     $('remain').textContent = fmtMi(Math.max(0, route.total - d)) + ' to go';
     const st = drive.step, sb = $('stepBox');

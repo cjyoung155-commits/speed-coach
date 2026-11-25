@@ -106,8 +106,10 @@ t('step speed: counts down into a turn', () => {
 });
 t('step speed: no building speed right before a turn', () => {
   const s = { target: 55, mode: 'cruise', gNow: 0, slowAhead: [{ dist: 150, mph: 15 }], dist: null };
-  assert.deepStrictEqual(C.stepSpeed(s, 50, 3), { mph: 45, dir: 'down' });
+  assert.strictEqual(C.stepSpeed(s, 50, 3), null);           // at 50 with a turn 150 m out: don't build more
   assert.deepStrictEqual(C.stepSpeed(s, 20, 3), { mph: 30, dir: 'up' });
+  const G = C.guide(s, 40, 3);
+  assert.strictEqual(G.state, 'hold'); assert(/Slowing ahead in 500 ft/.test(G.msg), G.msg);
 });
 t('acceleration estimate', () => {
   const a = C.accelFrom([0, 1, 2, 3].map(t => ({ t, v: 10 + 3 * t })));
@@ -126,5 +128,29 @@ t('no limit data: falls back to setting', () => {
 t('coast distance is sane', () => {
   const d = C.coastDistance(55, 25); assert(d > 350 && d < 520, d);
   assert.strictEqual(C.coastDistance(20, 25), 0);
+});
+// The lines on screen must never disagree, at any spot on the route and any speed.
+t('hint, message and 4-second number always agree', () => {
+  const bad = [];
+  for (let d = 0; d <= 10000; d += 10) {
+    for (const v of [0, 3, 10, 18, 25, 30, 40, 48, 52, 55, 58, 65]) {
+      for (const prevMode of [null, 'climb', 'crest', 'descent', 'slowdown', 'turn']) {
+        const s = at(d, v, { prevMode }), G = C.guide(s, v, 3), m = G.msg || '', h = G.hint;
+        const saysUp = /Speed up|build|Build|Ease up/.test(h + ' ' + m);
+        const saysDown = /Ease off|Lift|ease back|Ease back|let it drop|slow to|slow down|Off the gas/.test(h + ' ' + m);
+        const saysHold = /Hold a steady|hold a steady|Hold this|Steady throttle/.test(h + ' ' + m);
+        const problem =
+          (/Speed up/.test(h) && /Hold a steady|let it drop|Ease back|ease back|Off the gas|no need/.test(m)) ||
+          (/Ease off|Lift/.test(h) && /build|Build|Ease up/.test(m)) ||
+          (G.step && G.step.dir === 'up' && (G.state !== 'under' || saysDown && !saysUp)) ||
+          (G.step && G.step.dir === 'down' && G.state !== 'over') ||
+          (G.state === 'on' && Math.abs(v - s.target) > 2 && !s.holdBelow) ||
+          (G.state === 'under' && !G.step) ||
+          (saysHold && G.step);
+        if (problem) bad.push(`d=${d} v=${v} prev=${prevMode} mode=${s.mode} T=${s.target} state=${G.state} hint="${h}" msg="${m}" step=${JSON.stringify(G.step)}`);
+      }
+    }
+  }
+  assert(!bad.length, bad.length + ' conflicts, e.g.\n       ' + bad.slice(0, 4).join('\n       '));
 });
 console.log(pass + ' passed');

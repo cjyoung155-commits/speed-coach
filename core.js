@@ -410,7 +410,7 @@
       if (scan.crest && (scan.crest.rollsOver || wasCrest) && scan.crest.at <= (wasCrest ? 300 : 200)) {
         return Object.assign(out, {
           mode: 'crest', target: Math.max(5, cruise - S.band), holdBelow: true,
-          msg: 'Near the top — ease off and let it roll over', cue: 'Near the top. Ease off.'
+          msg: 'Near the top — let it roll over', cue: 'Near the top. Ease off.'
         });
       }
       const sag = clamp(Math.round(0.8 * (gNow - 1)), 1, S.band);
@@ -437,6 +437,7 @@
     if (scan.climb && scan.climb.at <= 500 && scan.climb.len >= 150) {
       return Object.assign(out, {
         mode: 'preclimb', target: base,
+        lead: scan.climb.at < 60 ? 'Hill starting' : 'Hill in ' + fmtDist(scan.climb.at),
         msg: (scan.climb.at < 60 ? 'Hill starting' : 'Hill in ' + fmtDist(scan.climb.at)) + ' — build to ' + base + ' now',
         cue: 'Hill ahead. Build to ' + base + '.'
       });
@@ -457,9 +458,20 @@
     if (s.mode === 'arrived') return 'on';
     if (Math.abs(diff) <= 2) return 'on';
     if (diff > 2) return 'over';
-    if (s.mode === 'climb' || s.mode === 'crest') return diff >= -6 ? 'hold' : 'under';
+    if (s.mode === 'climb') return diff >= -6 ? 'hold' : 'under';
+    if (s.mode === 'crest' || s.mode === 'descent' || s.mode === 'momentum') return 'hold';   // gravity's job
     if (s.holdBelow) return 'on';
     return 'under';
+  }
+
+  /** Highest speed worth having now, given turns and lower limits ahead (mph). */
+  function speedCap(s) {
+    let cap = Infinity;
+    for (const c of (s.slowAhead || [])) {
+      const vt = c.mph / MPS_TO_MPH;
+      cap = Math.min(cap, Math.sqrt(vt * vt + 2 * EASY_DECEL * Math.max(0, c.dist)) * MPS_TO_MPH);
+    }
+    return cap;
   }
 
   /**
@@ -474,30 +486,71 @@
     speed = Math.max(0, speed || 0);
     const goal = s.target;
     const vMs = speed / MPS_TO_MPH;
-    // Highest speed worth having now, given slow points ahead.
-    let cap = Infinity;
-    for (const c of (s.slowAhead || [])) {
-      const vt = c.mph / MPS_TO_MPH;
-      cap = Math.min(cap, Math.sqrt(vt * vt + 2 * EASY_DECEL * Math.max(0, c.dist)) * MPS_TO_MPH);
-    }
-    const ceiling = Math.max(Math.min(goal, cap), Math.min(goal, 5));
-    if (speed < ceiling - 2) {
-      const hill = s.mode === 'climb' || s.mode === 'crest';
-      if (hill && speed >= goal - 6) return null;          // a little sag on a climb is the plan
-      if (!hill && s.holdBelow) return null;               // slowing for a turn/limit/downhill: under is fine
+    if (speed < goal - 2) {
+      if (s.mode === 'climb' && speed >= goal - 6) return null;                 // a little sag on a climb is the plan
+      if (s.mode === 'crest' || s.mode === 'descent' || s.mode === 'momentum') return null;   // let gravity do it
+      if (s.holdBelow && s.mode !== 'climb') return null;                       // slowing for a turn/limit: under is fine
+      const top = Math.max(Math.min(goal, speedCap(s)), Math.min(goal, 5));
+      if (speed >= top - 2) return null;                                        // more speed would just be braked away
       const g = Math.max(0, s.gNow || 0);
-      const rate = Math.max(0.75, (accelLimit || 3) * 0.8 - 0.3 * g);   // mph per second
-      return { mph: Math.round(Math.min(ceiling, speed + rate * STEP_SECS)), dir: 'up' };
+      const rate = Math.max(0.75, (accelLimit || 3) * 0.8 - 0.3 * g);           // mph per second
+      return { mph: Math.round(Math.min(top, speed + rate * STEP_SECS)), dir: 'up' };
     }
-    if (speed > ceiling + 2) {
-      let rate = COAST_DECEL * MPS_TO_MPH;                               // ~1.2 mph per second
+    if (speed > goal + 2) {
+      let rate = COAST_DECEL * MPS_TO_MPH;                                      // ~1.2 mph per second
       if (s.dist != null && s.dist > 1) {
         const vt = goal / MPS_TO_MPH;
         rate = Math.max(rate, (vMs * vMs - vt * vt) / (2 * s.dist) * MPS_TO_MPH);
       }
-      return { mph: Math.round(Math.max(ceiling, speed - rate * STEP_SECS)), dir: 'down' };
+      return { mph: Math.round(Math.max(goal, speed - rate * STEP_SECS)), dir: 'down' };
     }
     return null;
+  }
+
+  /**
+   * Everything the driver reads, decided together so the lines never disagree:
+   * {state: 'on'|'over'|'under'|'hold', hint (under the number), msg (the line below), step}.
+   */
+  function guide(s, speed, accelLimit) {
+    speed = Math.max(0, speed || 0);
+    if (s.mode === 'arrived') return { state: 'on', hint: 'Arrived', msg: s.msg, step: null };
+    const step = stepSpeed(s, speed, accelLimit);
+    const T = Math.round(s.target), g = fmtGrade(s.gNow || 0);
+    let state = speedState(speed, s);
+    const over = state === 'over', on = state === 'on';
+    let hint, msg;
+    switch (s.mode) {
+      case 'turn': case 'arriving': case 'slowdown': case 'predescent':
+        hint = over ? 'Lift off the gas' : 'On target'; msg = s.msg; break;
+      case 'crest':
+        hint = over ? 'Lift off the gas' : on ? 'On target' : 'Let it roll'; msg = s.msg; break;
+      case 'descent': case 'momentum':
+        hint = over ? 'Ease off' : on ? 'On target' : 'Off the gas — let it roll'; msg = s.msg; break;
+      case 'climb':
+        if (over) { hint = 'Ease off'; msg = 'Climbing ' + g + ' — let it drop to ' + T; }
+        else if (on) { hint = 'On target'; msg = 'Climbing ' + g + ' — hold a steady throttle'; }
+        else if (state === 'hold') { hint = 'Steady throttle'; msg = 'Climbing ' + g + ' — a little slower is fine'; }
+        else { hint = 'Speed up gently'; msg = 'Climbing ' + g + ' — build gently toward ' + T; }
+        break;
+      case 'preclimb': {
+        const lead = s.lead || 'Hill ahead';
+        if (over) { hint = 'Ease off'; msg = lead + ' — ease back to ' + T; }
+        else if (on) { hint = 'On target'; msg = lead + ' — hold ' + T + ' into it'; }
+        else { hint = 'Speed up gently'; msg = lead + ' — build to ' + T + ' now'; }
+        break;
+      }
+      default:
+        if (over) { hint = 'Ease off'; msg = 'Ease back to ' + T; }
+        else if (on) { hint = 'On target'; msg = 'Hold a steady speed'; }
+        else { hint = 'Speed up gently'; msg = (speed < 5 ? 'Ease up gently to ' : 'Build gently to ') + T; }
+    }
+    // Under the goal, but a turn or lower limit is close enough that more speed would be braked away.
+    if (state === 'under' && !step) {
+      const near = (s.slowAhead || []).reduce((a, c) => (!a || c.dist < a.dist ? c : a), null);
+      state = 'hold'; hint = 'Hold this speed';
+      msg = 'Slowing ahead' + (near ? ' in ' + fmtDist(near.dist) : '') + ' — no need to speed up';
+    }
+    return { state, hint, msg, step };
   }
 
   /** Acceleration (mph per second) from recent [{t: seconds, v: mph}] samples; null if too few. */
@@ -516,7 +569,7 @@
     haversine, buildRoute, snap, segIndexAt, pointAt, sampleRoute, sampleStepFor,
     buildProfile, flatProfile, elevAt, gradeAvg, scanAhead,
     parseMaxspeed, buildLimits, limitAt, nextLowerLimit, nextSlowManeuver, coastDistance,
-    slowSpeedFor, fmtDist, fmtGrade, suggest, speedState, stepSpeed, accelFrom,
+    slowSpeedFor, fmtDist, fmtGrade, suggest, speedState, stepSpeed, speedCap, guide, accelFrom,
     SLOW_CUE_M, STEP_SECS
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
